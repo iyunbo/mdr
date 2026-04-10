@@ -1,4 +1,5 @@
 mod error;
+mod fs;
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -12,8 +13,12 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-    match cli.path {
-        Some(p) => println!("Opening: {}", p.display()),
-        None => println!("No path given — will open file browser"),
+    if let Some(path) = cli.path {
+        match fs::read_file(path.to_str().unwrap_or("")) {
+            Ok(content) => println!("{}", content),
+            Err(e) => eprintln!("Error: {}", e),
+        }
+    } else {
+        println!("No path given — will open file browser");
     }
 }
