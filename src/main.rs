@@ -2,12 +2,14 @@ mod app;
 mod config;
 mod error;
 mod fs;
+mod keys;
 mod markdown;
 mod ui;
 
 use app::{App, AppState};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use keys::Action;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -97,48 +99,64 @@ fn run(
             continue;
         };
 
-        match app.state {
-            AppState::Viewing => match (key.code, key.modifiers) {
-                (KeyCode::Char('q'), _) => app.quit(),
-                (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.quit(),
-                (KeyCode::Down, _) | (KeyCode::Char('j'), _) => app.scroll_down(),
-                (KeyCode::Up, _) | (KeyCode::Char('k'), _) => app.scroll_up(),
-                (KeyCode::Char('g'), _) => app.scroll_top(),
-                (KeyCode::Esc, _) => {
-                    if app.tree.is_some() {
-                        app.state = AppState::Browsing;
-                    }
-                }
-                _ => {}
-            },
-            AppState::Browsing => match (key.code, key.modifiers) {
-                (KeyCode::Char('q'), _) => app.quit(),
-                (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.quit(),
-                (KeyCode::Down, _) | (KeyCode::Char('j'), _) => app.cursor_down(),
-                (KeyCode::Up, _) | (KeyCode::Char('k'), _) => app.cursor_up(),
-                (KeyCode::Enter, _) => spawn_open_selected(app, &tx),
-                _ => {}
-            },
-            AppState::Loading => match (key.code, key.modifiers) {
-                (KeyCode::Char('q'), _) => app.quit(),
-                (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.quit(),
-                _ => {}
-            },
+        if matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+            app.quit();
+            continue;
         }
+
+        let Some(&action) = app.keymap.get(&key.code) else {
+            continue;
+        };
+        dispatch(app, action, &tx);
     }
     Ok(())
 }
 
-fn spawn_open_selected(app: &mut App, tx: &mpsc::Sender<LoadMsg>) {
+fn dispatch(app: &mut App, action: Action, tx: &mpsc::Sender<LoadMsg>) {
+    match (app.state, action) {
+        (_, Action::Quit) => app.quit(),
+        (AppState::Loading, _) => {}
+        (AppState::Viewing, Action::Down) => app.scroll_down(),
+        (AppState::Viewing, Action::Up) => app.scroll_up(),
+        (AppState::Viewing, Action::Top) => app.scroll_top(),
+        (AppState::Viewing, Action::Back) => {
+            if app.tree.is_some() {
+                app.state = AppState::Browsing;
+            }
+        }
+        (AppState::Viewing, Action::Activate) => {}
+        (AppState::Browsing, Action::Down) => app.cursor_down(),
+        (AppState::Browsing, Action::Up) => app.cursor_up(),
+        (AppState::Browsing, Action::Top) => app.cursor_top(),
+        (AppState::Browsing, Action::Activate) => activate_selected(app, tx),
+        (AppState::Browsing, Action::Back) => app.collapse_selected(),
+    }
+}
+
+fn activate_selected(app: &mut App, tx: &mpsc::Sender<LoadMsg>) {
+    let Some(node) = app.selected_node() else {
+        return;
+    };
+    match node {
+        fs::FileNode::Dir { .. } => {
+            if let Err(e) = app.toggle_selected() {
+                app.load_error = Some(e.to_string());
+            }
+        }
+        fs::FileNode::File(_) if node.is_markdown() => {
+            spawn_load(app, tx);
+        }
+        _ => {}
+    }
+}
+
+fn spawn_load(app: &mut App, tx: &mpsc::Sender<LoadMsg>) {
     let Some(node) = app.selected_node().cloned() else {
         return;
     };
     let fs::FileNode::File(path) = &node else {
         return;
     };
-    if !node.is_markdown() {
-        return;
-    }
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
