@@ -33,6 +33,7 @@ pub fn color_from_str(s: &str) -> Color {
     }
 }
 
+#[cfg(test)]
 pub fn parse(content: &str) -> Vec<Line<'static>> {
     parse_with_config(content, &RenderConfig::default())
 }
