@@ -6,6 +6,7 @@ pub enum AppState {
     #[default]
     Browsing,
     Viewing,
+    Loading,
 }
 
 pub struct App {
@@ -17,6 +18,7 @@ pub struct App {
     pub tree: Option<FileNode>,
     pub tree_cursor: usize,
     pub config: Config,
+    pub load_error: Option<String>,
 }
 
 impl App {
@@ -30,7 +32,26 @@ impl App {
             tree: None,
             tree_cursor: 0,
             config,
+            load_error: None,
         }
+    }
+
+    pub fn set_loading(&mut self) {
+        self.state = AppState::Loading;
+        self.content = None;
+        self.load_error = None;
+    }
+
+    pub fn set_content(&mut self, content: String, name: String) {
+        self.content = Some(content);
+        self.file_name = Some(name);
+        self.scroll = 0;
+        self.state = AppState::Viewing;
+    }
+
+    pub fn set_error(&mut self, err: String) {
+        self.load_error = Some(err);
+        self.state = AppState::Browsing;
     }
 
     pub fn quit(&mut self) {

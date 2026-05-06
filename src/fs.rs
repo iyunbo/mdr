@@ -6,6 +6,10 @@ pub fn read_file(path: &str) -> Result<String, AppError> {
     Ok(content)
 }
 
+pub async fn read_file_async(path: PathBuf) -> Result<String, AppError> {
+    tokio::fs::read_to_string(&path).await.map_err(AppError::from)
+}
+
 #[derive(Debug, Clone)]
 pub enum FileNode {
     File(PathBuf),
