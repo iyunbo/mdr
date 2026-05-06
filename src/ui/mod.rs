@@ -37,7 +37,7 @@ fn draw_browsing(frame: &mut Frame, app: &App) {
     frame.render_widget(tree_widget, chunks[0]);
 
     if let Some(content) = &app.content {
-        let lines = markdown::parse(content);
+        let lines = markdown::parse_with_config(content, &render_config(app));
         let widget = preview::PreviewWidget {
             lines: &lines,
             scroll: app.scroll,
@@ -54,11 +54,18 @@ fn draw_browsing(frame: &mut Frame, app: &App) {
 
 fn draw_viewing(frame: &mut Frame, app: &App) {
     let content = app.content.as_deref().unwrap_or("");
-    let lines = markdown::parse(content);
+    let lines = markdown::parse_with_config(content, &render_config(app));
     let widget = preview::PreviewWidget {
         lines: &lines,
         scroll: app.scroll,
         title: app.file_name.as_deref().unwrap_or("untitled"),
     };
     frame.render_widget(widget, frame.area());
+}
+
+fn render_config(app: &App) -> markdown::RenderConfig {
+    markdown::RenderConfig {
+        heading_color: markdown::color_from_str(&app.config.theme.heading_color),
+        code_color: markdown::color_from_str(&app.config.theme.code_color),
+    }
 }

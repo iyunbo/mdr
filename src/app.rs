@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::fs::FileNode;
 
 #[derive(Debug, Default, PartialEq)]
@@ -15,10 +16,11 @@ pub struct App {
     pub file_name: Option<String>,
     pub tree: Option<FileNode>,
     pub tree_cursor: usize,
+    pub config: Config,
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(config: Config) -> Self {
         Self {
             running: true,
             state: AppState::default(),
@@ -27,6 +29,7 @@ impl App {
             file_name: None,
             tree: None,
             tree_cursor: 0,
+            config,
         }
     }
 

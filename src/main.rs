@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod error;
 mod fs;
 mod markdown;
@@ -17,7 +18,8 @@ struct Cli {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let mut app = App::new();
+    let cfg = config::load();
+    let mut app = App::new(cfg);
 
     match cli.path {
         Some(ref path) if path.is_file() => {
