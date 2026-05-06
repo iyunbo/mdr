@@ -1,7 +1,7 @@
 pub mod file_tree;
 pub mod preview;
 
-use crate::app::{App, AppState};
+use crate::app::{App, AppState, SearchDirection};
 use crate::markdown;
 use ratatui::{
     Frame,
@@ -11,59 +11,59 @@ use ratatui::{
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    match app.state {
-        AppState::Browsing => draw_browsing(frame, app),
-        AppState::Viewing => draw_viewing(frame, app),
-        AppState::Loading => draw_loading(frame),
-    }
-}
-
-fn draw_browsing(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    let (main_area, error_area) = split_for_error(area, app.load_error.is_some());
+    let (main_area, status_area, error_area) = split_layout(area, app);
 
-    if let Some(tree) = &app.tree {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-            .split(main_area);
-
-        let tree_widget = file_tree::FileTreeWidget {
-            node: tree,
-            cursor: app.tree_cursor,
-        };
-        frame.render_widget(tree_widget, chunks[0]);
-
-        if let Some(content) = &app.content {
-            let lines = markdown::parse_with_config(content, &render_config(app));
-            let widget = preview::PreviewWidget {
-                lines: &lines,
-                scroll: app.scroll,
-                title: app.file_name.as_deref().unwrap_or(""),
-            };
-            frame.render_widget(widget, chunks[1]);
-        } else {
-            let preview_block = Block::default()
-                .borders(Borders::ALL)
-                .title(" Preview ");
-            frame.render_widget(preview_block, chunks[1]);
-        }
-    } else {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" mdr - no directory loaded ");
-        frame.render_widget(block, main_area);
+    match app.state {
+        AppState::Browsing => draw_browsing(frame, main_area, app),
+        AppState::Viewing => draw_viewing(frame, main_area, app),
+        AppState::Loading => draw_loading(frame, main_area),
     }
 
-    if let (Some(err), Some(err_area)) = (&app.load_error, error_area) {
+    if let Some(area) = status_area {
+        draw_status_bar(frame, area, app);
+    }
+    if let (Some(area), Some(err)) = (error_area, app.load_error.as_ref()) {
         let error_widget = Paragraph::new(format!("Error: {}", err))
             .style(Style::default().fg(Color::Red))
             .block(Block::default().borders(Borders::ALL).title(" Error "));
-        frame.render_widget(error_widget, err_area);
+        frame.render_widget(error_widget, area);
     }
 }
 
-fn draw_viewing(frame: &mut Frame, app: &App) {
+fn draw_browsing(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(tree) = &app.tree else {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" mdr - no directory loaded ");
+        frame.render_widget(block, area);
+        return;
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .split(area);
+
+    file_tree::render(frame, chunks[0], tree, app.tree_cursor);
+
+    if let Some(content) = &app.content {
+        let lines = markdown::parse_with_config(content, &render_config(app));
+        let widget = preview::PreviewWidget {
+            lines: &lines,
+            scroll: app.scroll,
+            title: app.file_name.as_deref().unwrap_or(""),
+        };
+        frame.render_widget(widget, chunks[1]);
+    } else {
+        let preview_block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Preview ");
+        frame.render_widget(preview_block, chunks[1]);
+    }
+}
+
+fn draw_viewing(frame: &mut Frame, area: Rect, app: &App) {
     let content = app.content.as_deref().unwrap_or("");
     let lines = markdown::parse_with_config(content, &render_config(app));
     let widget = preview::PreviewWidget {
@@ -71,13 +71,13 @@ fn draw_viewing(frame: &mut Frame, app: &App) {
         scroll: app.scroll,
         title: app.file_name.as_deref().unwrap_or("untitled"),
     };
-    frame.render_widget(widget, frame.area());
+    frame.render_widget(widget, area);
 }
 
-fn draw_loading(frame: &mut Frame) {
+fn draw_loading(frame: &mut Frame, area: Rect) {
     let block = Block::default().borders(Borders::ALL).title(" mdr ");
-    let inner = block.inner(frame.area());
-    frame.render_widget(block, frame.area());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
     let loading = Paragraph::new("Loading...")
         .style(Style::default().fg(Color::Yellow))
@@ -85,15 +85,63 @@ fn draw_loading(frame: &mut Frame) {
     frame.render_widget(loading, inner);
 }
 
-fn split_for_error(area: Rect, has_error: bool) -> (Rect, Option<Rect>) {
-    if !has_error {
-        return (area, None);
+fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
+    if let Some(input) = &app.search_input {
+        let prefix = match input.direction {
+            SearchDirection::Forward => '/',
+            SearchDirection::Backward => '?',
+        };
+        let text = format!("{}{}", prefix, input.buffer);
+        let widget = Paragraph::new(text).style(Style::default().fg(Color::Yellow));
+        frame.render_widget(widget, area);
+        return;
     }
+    if let Some(msg) = &app.status_message {
+        let widget = Paragraph::new(msg.clone()).style(Style::default().fg(Color::Red));
+        frame.render_widget(widget, area);
+        return;
+    }
+    if !app.count_buffer.is_empty() {
+        let widget = Paragraph::new(app.count_buffer.clone())
+            .style(Style::default().fg(Color::Cyan))
+            .alignment(Alignment::Right);
+        frame.render_widget(widget, area);
+    }
+}
+
+/// Split the terminal into (main, status, error) areas. Status is shown when
+/// search input is active, a status message is set, or the count buffer is
+/// non-empty. Error is shown only when `load_error` is set.
+fn split_layout(area: Rect, app: &App) -> (Rect, Option<Rect>, Option<Rect>) {
+    let want_status = app.search_input.is_some()
+        || app.status_message.is_some()
+        || !app.count_buffer.is_empty();
+    let want_error = app.load_error.is_some();
+
+    let mut constraints: Vec<Constraint> = vec![Constraint::Min(0)];
+    if want_status {
+        constraints.push(Constraint::Length(1));
+    }
+    if want_error {
+        constraints.push(Constraint::Length(3));
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(3)])
+        .constraints(constraints)
         .split(area);
-    (chunks[0], Some(chunks[1]))
+
+    let main = chunks[0];
+    let mut idx = 1;
+    let status = if want_status {
+        let r = Some(chunks[idx]);
+        idx += 1;
+        r
+    } else {
+        None
+    };
+    let error = if want_error { Some(chunks[idx]) } else { None };
+    (main, status, error)
 }
 
 fn render_config(app: &App) -> markdown::RenderConfig {

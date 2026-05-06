@@ -10,6 +10,10 @@ pub enum Action {
     Top,
     Activate,
     Back,
+    SearchForward,
+    SearchBackward,
+    RepeatNext,
+    RepeatPrev,
 }
 
 pub fn parse_key(s: &str) -> Option<KeyCode> {
@@ -41,6 +45,10 @@ pub fn parse_action(s: &str) -> Option<Action> {
         "top" => Some(Action::Top),
         "activate" | "open" => Some(Action::Activate),
         "back" => Some(Action::Back),
+        "search_forward" => Some(Action::SearchForward),
+        "search_backward" => Some(Action::SearchBackward),
+        "repeat_next" => Some(Action::RepeatNext),
+        "repeat_prev" => Some(Action::RepeatPrev),
         _ => None,
     }
 }

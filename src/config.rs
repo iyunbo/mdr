@@ -80,6 +80,16 @@ impl Default for Config {
                         "Left".to_string(),
                     ]),
                 ),
+                (
+                    "search_forward".to_string(),
+                    KeyBinding::Single("/".to_string()),
+                ),
+                (
+                    "search_backward".to_string(),
+                    KeyBinding::Single("?".to_string()),
+                ),
+                ("repeat_next".to_string(), KeyBinding::Single("n".to_string())),
+                ("repeat_prev".to_string(), KeyBinding::Single("N".to_string())),
             ]),
         }
     }

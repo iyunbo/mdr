@@ -6,9 +6,9 @@ mod keys;
 mod markdown;
 mod ui;
 
-use app::{App, AppState};
+use app::{App, AppState, SearchDirection};
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use keys::Action;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -99,25 +99,53 @@ fn run(
             continue;
         };
 
-        if matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL) {
-            app.quit();
-            continue;
-        }
-
-        let Some(&action) = app.keymap.get(&key.code) else {
-            continue;
-        };
-        dispatch(app, action, &tx);
+        handle_key(app, key, &tx);
     }
     Ok(())
 }
 
-fn dispatch(app: &mut App, action: Action, tx: &mpsc::Sender<LoadMsg>) {
+fn handle_key(app: &mut App, key: KeyEvent, tx: &mpsc::Sender<LoadMsg>) {
+    // Hardcoded fallback: Ctrl+C always quits.
+    if matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.quit();
+        return;
+    }
+
+    // Search input mode captures all keys.
+    if app.search_input.is_some() {
+        match key.code {
+            KeyCode::Esc => app.cancel_search(),
+            KeyCode::Enter => app.confirm_search(),
+            KeyCode::Backspace => app.search_input_pop(),
+            KeyCode::Char(c) => app.search_input_push(c),
+            _ => {}
+        }
+        return;
+    }
+
+    // Number prefix: digits accumulate into the count buffer.
+    if let KeyCode::Char(c) = key.code {
+        if app.push_count_digit(c) {
+            return;
+        }
+    }
+
+    // Action dispatch.
+    let count = app.take_count() as usize;
+    if let Some(&action) = app.keymap.get(&key.code) {
+        // Clear ephemeral status the moment a real action fires.
+        app.status_message = None;
+        dispatch(app, action, tx, count);
+    }
+}
+
+fn dispatch(app: &mut App, action: Action, tx: &mpsc::Sender<LoadMsg>, count: usize) {
+    let count = count.max(1);
     match (app.state, action) {
         (_, Action::Quit) => app.quit(),
         (AppState::Loading, _) => {}
-        (AppState::Viewing, Action::Down) => app.scroll_down(),
-        (AppState::Viewing, Action::Up) => app.scroll_up(),
+        (AppState::Viewing, Action::Down) => repeat(count, || app.scroll_down()),
+        (AppState::Viewing, Action::Up) => repeat(count, || app.scroll_up()),
         (AppState::Viewing, Action::Top) => app.scroll_top(),
         (AppState::Viewing, Action::Back) => {
             if app.tree.is_some() {
@@ -125,11 +153,21 @@ fn dispatch(app: &mut App, action: Action, tx: &mpsc::Sender<LoadMsg>) {
             }
         }
         (AppState::Viewing, Action::Activate) => {}
-        (AppState::Browsing, Action::Down) => app.cursor_down(),
-        (AppState::Browsing, Action::Up) => app.cursor_up(),
+        (AppState::Browsing, Action::Down) => repeat(count, || app.cursor_down()),
+        (AppState::Browsing, Action::Up) => repeat(count, || app.cursor_up()),
         (AppState::Browsing, Action::Top) => app.cursor_top(),
         (AppState::Browsing, Action::Activate) => activate_selected(app, tx),
         (AppState::Browsing, Action::Back) => app.collapse_selected(),
+        (_, Action::SearchForward) => app.start_search(SearchDirection::Forward),
+        (_, Action::SearchBackward) => app.start_search(SearchDirection::Backward),
+        (_, Action::RepeatNext) => app.repeat_search(false),
+        (_, Action::RepeatPrev) => app.repeat_search(true),
+    }
+}
+
+fn repeat<F: FnMut()>(count: usize, mut f: F) {
+    for _ in 0..count {
+        f();
     }
 }
 
