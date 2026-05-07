@@ -24,7 +24,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_status_bar(frame, area, app);
     }
     if let (Some(area), Some(err)) = (error_area, app.load_error.as_ref()) {
-        let widget = Paragraph::new(format!("Error: {}", err)).style(Style::default().fg(Color::Red));
+        let widget =
+            Paragraph::new(format!("Error: {}", err)).style(Style::default().fg(Color::Red));
         frame.render_widget(widget, area);
     }
 }
@@ -99,9 +100,8 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn split_layout(area: Rect, app: &App) -> (Rect, Option<Rect>, Option<Rect>) {
-    let want_status = app.search_input.is_some()
-        || app.status_message.is_some()
-        || !app.count_buffer.is_empty();
+    let want_status =
+        app.search_input.is_some() || app.status_message.is_some() || !app.count_buffer.is_empty();
     let want_error = app.load_error.is_some();
 
     let mut constraints: Vec<Constraint> = vec![Constraint::Min(0)];

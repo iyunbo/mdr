@@ -19,8 +19,11 @@ impl<'a> Widget for PreviewWidget<'a> {
             .constraints([Constraint::Length(1), Constraint::Min(0)])
             .split(area);
 
-        let title = Paragraph::new(self.title)
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        let title = Paragraph::new(self.title).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
         title.render(chunks[0], buf);
 
         let paragraph = Paragraph::new(self.lines.to_vec()).scroll((self.scroll, 0));

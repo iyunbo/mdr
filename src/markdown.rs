@@ -87,10 +87,7 @@ pub fn parse_with_config(content: &str, config: &RenderConfig) -> Vec<Line<'stat
             }
             Event::Code(text) => {
                 push_span(
-                    Span::styled(
-                        text.to_string(),
-                        Style::default().fg(config.code_color),
-                    ),
+                    Span::styled(text.to_string(), Style::default().fg(config.code_color)),
                     &mut spans,
                     &mut table,
                 );
@@ -99,7 +96,7 @@ pub fn parse_with_config(content: &str, config: &RenderConfig) -> Vec<Line<'stat
                 let level = current_heading.take().unwrap_or(HeadingLevel::H1);
                 let text_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
                 if !spans.is_empty() {
-                    lines.push(Line::from(spans.drain(..).collect::<Vec<_>>()));
+                    lines.push(Line::from(std::mem::take(&mut spans)));
                 }
                 if let Some(ch) = underline_char(level) {
                     let underline = ch.to_string().repeat(text_len.max(1));
@@ -146,10 +143,8 @@ pub fn parse_with_config(content: &str, config: &RenderConfig) -> Vec<Line<'stat
                     t.current_row.push(cell);
                 }
             }
-            Event::SoftBreak | Event::HardBreak => {
-                if table.is_none() && !spans.is_empty() {
-                    lines.push(Line::from(spans.drain(..).collect::<Vec<_>>()));
-                }
+            Event::SoftBreak | Event::HardBreak if table.is_none() && !spans.is_empty() => {
+                lines.push(Line::from(std::mem::take(&mut spans)));
             }
             _ => {}
         }
@@ -161,11 +156,7 @@ pub fn parse_with_config(content: &str, config: &RenderConfig) -> Vec<Line<'stat
     lines
 }
 
-fn push_span(
-    span: Span<'static>,
-    spans: &mut Vec<Span<'static>>,
-    table: &mut Option<TableBuf>,
-) {
+fn push_span(span: Span<'static>, spans: &mut Vec<Span<'static>>, table: &mut Option<TableBuf>) {
     if let Some(t) = table.as_mut() {
         t.current_cell.push(span);
     } else {
@@ -175,7 +166,7 @@ fn push_span(
 
 fn flush_block(spans: &mut Vec<Span<'static>>, lines: &mut Vec<Line<'static>>) {
     if !spans.is_empty() {
-        lines.push(Line::from(spans.drain(..).collect::<Vec<_>>()));
+        lines.push(Line::from(std::mem::take(spans)));
         lines.push(Line::default());
     }
 }
@@ -262,7 +253,7 @@ fn render_row(
     sep_style: Style,
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
-    for i in 0..col_count {
+    for (i, w) in widths.iter().enumerate().take(col_count) {
         let sep = if i == 0 { "│ " } else { " │ " };
         spans.push(Span::styled(sep, sep_style));
         let empty: Vec<Span<'static>> = Vec::new();
@@ -271,7 +262,7 @@ fn render_row(
         for s in cell {
             spans.push(s.clone());
         }
-        let pad = widths[i].saturating_sub(used);
+        let pad = w.saturating_sub(used);
         if pad > 0 {
             spans.push(Span::raw(" ".repeat(pad)));
         }
@@ -382,7 +373,11 @@ mod tests {
             .iter()
             .find(|l| l.spans.iter().any(|s| s.content.contains('═')))
             .expect("expected h1 ═ underline row");
-        let len: usize = underline.spans.iter().map(|s| s.content.chars().count()).sum();
+        let len: usize = underline
+            .spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum();
         assert_eq!(len, "Hello".chars().count());
     }
 
@@ -400,9 +395,11 @@ mod tests {
     #[test]
     fn test_h3_no_underline_row() {
         let lines = parse("### Smaller");
-        let has_underline = lines
-            .iter()
-            .any(|l| l.spans.iter().any(|s| s.content.contains('═') || s.content.contains('─')));
+        let has_underline = lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content.contains('═') || s.content.contains('─'))
+        });
         assert!(!has_underline, "h3 should not have underline row");
     }
 
@@ -427,7 +424,11 @@ mod tests {
             .iter()
             .filter(|l| l.spans.iter().all(|s| s.content.is_empty()))
             .count();
-        assert!(blanks >= 1, "expected at least one blank line, got {:?}", text);
+        assert!(
+            blanks >= 1,
+            "expected at least one blank line, got {:?}",
+            text
+        );
     }
 
     #[test]
@@ -472,12 +473,16 @@ mod tests {
     fn test_table_has_top_and_bottom_borders() {
         let md = "| a | b |\n|---|---|\n| 1 | 2 |\n";
         let lines = parse(md);
-        let has_top = lines
-            .iter()
-            .any(|l| l.spans.iter().any(|s| s.content.contains('┌') && s.content.contains('┐')));
-        let has_bottom = lines
-            .iter()
-            .any(|l| l.spans.iter().any(|s| s.content.contains('└') && s.content.contains('┘')));
+        let has_top = lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content.contains('┌') && s.content.contains('┐'))
+        });
+        let has_bottom = lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content.contains('└') && s.content.contains('┘'))
+        });
         assert!(has_top, "expected top border with ┌ and ┐");
         assert!(has_bottom, "expected bottom border with └ and ┘");
     }

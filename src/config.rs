@@ -88,8 +88,14 @@ impl Default for Config {
                     "search_backward".to_string(),
                     KeyBinding::Single("?".to_string()),
                 ),
-                ("repeat_next".to_string(), KeyBinding::Single("n".to_string())),
-                ("repeat_prev".to_string(), KeyBinding::Single("N".to_string())),
+                (
+                    "repeat_next".to_string(),
+                    KeyBinding::Single("n".to_string()),
+                ),
+                (
+                    "repeat_prev".to_string(),
+                    KeyBinding::Single("N".to_string()),
+                ),
             ]),
         }
     }
@@ -163,7 +169,10 @@ quit = "Q"
         let merged = merge(Config::default(), user);
         // User override
         assert_eq!(merged.theme.heading_color, "red");
-        assert_eq!(merged.keys.get("quit").unwrap().as_slice(), &["Q".to_string()]);
+        assert_eq!(
+            merged.keys.get("quit").unwrap().as_slice(),
+            &["Q".to_string()]
+        );
         // Defaults preserved
         assert!(merged.keys.contains_key("down"));
         assert!(merged.keys.contains_key("activate"));

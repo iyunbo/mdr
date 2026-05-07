@@ -118,8 +118,7 @@ impl App {
             .count_buffer
             .parse::<u32>()
             .unwrap_or(1)
-            .max(1)
-            .min(10_000);
+            .clamp(1, 10_000);
         self.count_buffer.clear();
         n
     }
@@ -236,7 +235,12 @@ impl App {
     /// Search for `query` in the current view, wrapping around. `skip_current`
     /// is true when called from `n`/`N` so we don't re-match the line we're
     /// already on.
-    fn jump_to_match(&mut self, query: &str, direction: SearchDirection, skip_current: bool) -> bool {
+    fn jump_to_match(
+        &mut self,
+        query: &str,
+        direction: SearchDirection,
+        skip_current: bool,
+    ) -> bool {
         if query.is_empty() {
             return false;
         }
@@ -374,10 +378,10 @@ impl App {
 
     fn collapse_at(node: &mut FileNode, target: usize, counter: &mut usize) -> bool {
         if *counter == target {
-            if let FileNode::Dir { expanded, .. } = node {
-                if *expanded {
-                    *expanded = false;
-                }
+            if let FileNode::Dir { expanded, .. } = node
+                && *expanded
+            {
+                *expanded = false;
             }
             return true;
         }

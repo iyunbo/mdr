@@ -13,8 +13,11 @@ pub fn render(frame: &mut Frame, area: Rect, node: &FileNode, cursor: usize) {
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(area);
 
-    let title = Paragraph::new("Files")
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    let title = Paragraph::new("Files").style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_widget(title, chunks[0]);
 
     let mut flat: Vec<(usize, &FileNode)> = Vec::new();
@@ -26,7 +29,9 @@ pub fn render(frame: &mut Frame, area: Rect, node: &FileNode, cursor: usize) {
             let indent = "  ".repeat(*depth);
             let prefix = match n {
                 FileNode::Dir { expanded: true, .. } => "▼ ",
-                FileNode::Dir { expanded: false, .. } => "▶ ",
+                FileNode::Dir {
+                    expanded: false, ..
+                } => "▶ ",
                 FileNode::File(_) => "  ",
             };
             let style = if n.is_markdown() {
@@ -46,8 +51,7 @@ pub fn render(frame: &mut Frame, area: Rect, node: &FileNode, cursor: usize) {
         })
         .collect();
 
-    let list = List::new(items)
-        .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan));
+    let list = List::new(items).highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan));
 
     let mut state = ListState::default();
     state.select(Some(cursor));

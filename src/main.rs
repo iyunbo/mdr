@@ -34,10 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.path {
         Some(ref path) if path.is_file() => match fs::read_file(path.to_str().unwrap_or("")) {
             Ok(content) => {
-                app.file_name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(String::from);
+                app.file_name = path.file_name().and_then(|n| n.to_str()).map(String::from);
                 app.content = Some(content);
                 app.state = AppState::Viewing;
             }
@@ -124,10 +121,10 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &mpsc::Sender<LoadMsg>) {
     }
 
     // Number prefix: digits accumulate into the count buffer.
-    if let KeyCode::Char(c) = key.code {
-        if app.push_count_digit(c) {
-            return;
-        }
+    if let KeyCode::Char(c) = key.code
+        && app.push_count_digit(c)
+    {
+        return;
     }
 
     // Action dispatch.
