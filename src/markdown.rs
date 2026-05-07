@@ -53,11 +53,13 @@ pub fn parse_with_config(content: &str, config: &RenderConfig) -> Vec<Line<'stat
     let mut current_style = Style::default();
     let mut current_heading: Option<HeadingLevel> = None;
     let mut table: Option<TableBuf> = None;
+    let mut in_code_block = false;
 
     let parser = Parser::new_ext(content, Options::all());
     for event in parser {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
+                flush_block(&mut spans, &mut lines);
                 blank_before_heading(&mut lines, level);
                 current_heading = Some(level);
                 current_style = heading_style(level, config);
@@ -78,6 +80,30 @@ pub fn parse_with_config(content: &str, config: &RenderConfig) -> Vec<Line<'stat
                 }
             }
             Event::Start(Tag::TableRow) | Event::Start(Tag::TableCell) => {}
+            Event::Start(Tag::CodeBlock(_)) => {
+                flush_block(&mut spans, &mut lines);
+                in_code_block = true;
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if !spans.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut spans)));
+                }
+                lines.push(Line::default());
+                in_code_block = false;
+            }
+            Event::Text(text) if in_code_block => {
+                let style = Style::default().fg(config.code_color);
+                let s = text.to_string();
+                let mut chunks = s.split('\n').peekable();
+                while let Some(chunk) = chunks.next() {
+                    if !chunk.is_empty() {
+                        spans.push(Span::styled(chunk.to_string(), style));
+                    }
+                    if chunks.peek().is_some() {
+                        lines.push(Line::from(std::mem::take(&mut spans)));
+                    }
+                }
+            }
             Event::Text(text) => {
                 push_span(
                     Span::styled(text.to_string(), current_style),
@@ -429,6 +455,55 @@ mod tests {
             "expected at least one blank line, got {:?}",
             text
         );
+    }
+
+    #[test]
+    fn test_fenced_code_block_preserves_line_breaks() {
+        let md = "before\n\n```sh\nline one\nline two\n```\n\n## Heading\n";
+        let lines = parse(md);
+        let text = flatten_text(&lines);
+        // Each code line should be on its own line, not concatenated.
+        let line_one_idx = lines
+            .iter()
+            .position(|l| l.spans.iter().any(|s| s.content.as_ref() == "line one"))
+            .expect("expected 'line one' as its own line");
+        let line_two_idx = lines
+            .iter()
+            .position(|l| l.spans.iter().any(|s| s.content.as_ref() == "line two"))
+            .expect("expected 'line two' as its own line");
+        assert!(line_two_idx > line_one_idx);
+        // Heading text must NOT be glued to a code-block line.
+        let heading_idx = lines
+            .iter()
+            .position(|l| l.spans.iter().any(|s| s.content.as_ref() == "Heading"))
+            .expect("expected 'Heading' line");
+        assert!(
+            heading_idx > line_two_idx,
+            "heading must come after code block, got: {:?}",
+            text
+        );
+        let heading_line = &lines[heading_idx];
+        let heading_text: String = heading_line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(heading_text.trim(), "Heading");
+    }
+
+    #[test]
+    fn test_code_block_lines_use_code_color() {
+        let cfg = RenderConfig {
+            heading_color: Color::Cyan,
+            code_color: Color::Magenta,
+        };
+        let lines = parse_with_config("```\nhello\n```\n", &cfg);
+        let span = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.as_ref() == "hello")
+            .expect("expected 'hello' span");
+        assert_eq!(span.style.fg, Some(Color::Magenta));
     }
 
     #[test]
