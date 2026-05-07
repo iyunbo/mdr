@@ -7,7 +7,7 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Borders, Paragraph},
+    widgets::Paragraph,
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -24,19 +24,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_status_bar(frame, area, app);
     }
     if let (Some(area), Some(err)) = (error_area, app.load_error.as_ref()) {
-        let error_widget = Paragraph::new(format!("Error: {}", err))
-            .style(Style::default().fg(Color::Red))
-            .block(Block::default().borders(Borders::ALL).title(" Error "));
-        frame.render_widget(error_widget, area);
+        let widget = Paragraph::new(format!("Error: {}", err)).style(Style::default().fg(Color::Red));
+        frame.render_widget(widget, area);
     }
 }
 
 fn draw_browsing(frame: &mut Frame, area: Rect, app: &App) {
     let Some(tree) = &app.tree else {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" mdr - no directory loaded ");
-        frame.render_widget(block, area);
+        let widget = Paragraph::new("No directory loaded")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        frame.render_widget(widget, area);
         return;
     };
 
@@ -55,11 +53,6 @@ fn draw_browsing(frame: &mut Frame, area: Rect, app: &App) {
             title: app.file_name.as_deref().unwrap_or(""),
         };
         frame.render_widget(widget, chunks[1]);
-    } else {
-        let preview_block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Preview ");
-        frame.render_widget(preview_block, chunks[1]);
     }
 }
 
@@ -75,14 +68,10 @@ fn draw_viewing(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_loading(frame: &mut Frame, area: Rect) {
-    let block = Block::default().borders(Borders::ALL).title(" mdr ");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let loading = Paragraph::new("Loading...")
+    let widget = Paragraph::new("Loading...")
         .style(Style::default().fg(Color::Yellow))
         .alignment(Alignment::Center);
-    frame.render_widget(loading, inner);
+    frame.render_widget(widget, area);
 }
 
 fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
@@ -109,9 +98,6 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// Split the terminal into (main, status, error) areas. Status is shown when
-/// search input is active, a status message is set, or the count buffer is
-/// non-empty. Error is shown only when `load_error` is set.
 fn split_layout(area: Rect, app: &App) -> (Rect, Option<Rect>, Option<Rect>) {
     let want_status = app.search_input.is_some()
         || app.status_message.is_some()
@@ -123,7 +109,7 @@ fn split_layout(area: Rect, app: &App) -> (Rect, Option<Rect>, Option<Rect>) {
         constraints.push(Constraint::Length(1));
     }
     if want_error {
-        constraints.push(Constraint::Length(3));
+        constraints.push(Constraint::Length(1));
     }
 
     let chunks = Layout::default()

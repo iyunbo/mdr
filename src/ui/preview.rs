@@ -1,8 +1,9 @@
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
     text::Line,
-    widgets::{Block, Borders, Paragraph, Widget},
+    widgets::{Paragraph, Widget},
 };
 
 pub struct PreviewWidget<'a> {
@@ -13,14 +14,16 @@ pub struct PreviewWidget<'a> {
 
 impl<'a> Widget for PreviewWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" {} ", self.title));
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
 
-        let paragraph = Paragraph::new(self.lines.to_vec())
-            .block(block)
-            .scroll((self.scroll, 0));
+        let title = Paragraph::new(self.title)
+            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        title.render(chunks[0], buf);
 
-        paragraph.render(area, buf);
+        let paragraph = Paragraph::new(self.lines.to_vec()).scroll((self.scroll, 0));
+        paragraph.render(chunks[1], buf);
     }
 }
