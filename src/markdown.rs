@@ -243,13 +243,15 @@ fn render_table(buf: TableBuf, lines: &mut Vec<Line<'static>>, _config: &RenderC
 
     let sep_style = Style::default().fg(Color::DarkGray);
 
+    lines.push(border_row(&widths, sep_style, '┌', '┬', '┐'));
     if !buf.head.is_empty() {
         lines.push(render_row(&buf.head, &widths, col_count, sep_style));
-        lines.push(render_separator(&widths, sep_style));
+        lines.push(border_row(&widths, sep_style, '├', '┼', '┤'));
     }
     for row in &buf.body {
         lines.push(render_row(row, &widths, col_count, sep_style));
     }
+    lines.push(border_row(&widths, sep_style, '└', '┴', '┘'));
     lines.push(Line::default());
 }
 
@@ -261,11 +263,8 @@ fn render_row(
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     for i in 0..col_count {
-        if i == 0 {
-            spans.push(Span::raw(" "));
-        } else {
-            spans.push(Span::styled(" │ ", sep_style));
-        }
+        let sep = if i == 0 { "│ " } else { " │ " };
+        spans.push(Span::styled(sep, sep_style));
         let empty: Vec<Span<'static>> = Vec::new();
         let cell = row.get(i).unwrap_or(&empty);
         let used: usize = cell_width(cell);
@@ -277,13 +276,28 @@ fn render_row(
             spans.push(Span::raw(" ".repeat(pad)));
         }
     }
-    spans.push(Span::raw(" "));
+    spans.push(Span::styled(" │", sep_style));
     Line::from(spans)
 }
 
-fn render_separator(widths: &[usize], sep_style: Style) -> Line<'static> {
-    let parts: Vec<String> = widths.iter().map(|w| "─".repeat(w + 2)).collect();
-    let s = parts.join("┼");
+fn border_row(
+    widths: &[usize],
+    sep_style: Style,
+    left: char,
+    mid: char,
+    right: char,
+) -> Line<'static> {
+    let mut s = String::new();
+    s.push(left);
+    for (i, w) in widths.iter().enumerate() {
+        if i > 0 {
+            s.push(mid);
+        }
+        for _ in 0..(w + 2) {
+            s.push('─');
+        }
+    }
+    s.push(right);
     Line::from(Span::styled(s, sep_style))
 }
 
@@ -452,6 +466,20 @@ mod tests {
             "expected 'a' padded with spaces, got {:?}",
             header_text
         );
+    }
+
+    #[test]
+    fn test_table_has_top_and_bottom_borders() {
+        let md = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let lines = parse(md);
+        let has_top = lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains('┌') && s.content.contains('┐')));
+        let has_bottom = lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains('└') && s.content.contains('┘')));
+        assert!(has_top, "expected top border with ┌ and ┐");
+        assert!(has_bottom, "expected bottom border with └ and ┘");
     }
 
     #[test]
