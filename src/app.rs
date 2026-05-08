@@ -3,7 +3,10 @@ use crate::error::AppError;
 use crate::fs::{self, FileNode};
 use crate::keys::{self, Action, KeyCombo};
 use crate::markdown;
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::StatefulProtocol;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchDirection {
@@ -31,6 +34,7 @@ pub struct App {
     pub scroll: u16,
     pub content: Option<String>,
     pub file_name: Option<String>,
+    pub base_dir: Option<PathBuf>,
     pub tree: Option<FileNode>,
     pub tree_cursor: usize,
     pub config: Config,
@@ -41,6 +45,8 @@ pub struct App {
     pub last_search: Option<String>,
     pub last_search_direction: SearchDirection,
     pub status_message: Option<String>,
+    pub picker: Option<Picker>,
+    pub image_cache: HashMap<PathBuf, StatefulProtocol>,
 }
 
 impl App {
@@ -52,6 +58,7 @@ impl App {
             scroll: 0,
             content: None,
             file_name: None,
+            base_dir: None,
             tree: None,
             tree_cursor: 0,
             config,
@@ -62,6 +69,8 @@ impl App {
             last_search: None,
             last_search_direction: SearchDirection::Forward,
             status_message: None,
+            picker: None,
+            image_cache: HashMap::new(),
         }
     }
 
@@ -174,6 +183,7 @@ impl App {
         let cfg = markdown::RenderConfig {
             heading_color: markdown::color_from_str(&self.config.theme.heading_color),
             code_color: markdown::color_from_str(&self.config.theme.code_color),
+            image_height: self.config.theme.image_height,
         };
         markdown::parse_with_config(content, &cfg).len()
     }
@@ -274,6 +284,7 @@ impl App {
                 let cfg = markdown::RenderConfig {
                     heading_color: markdown::color_from_str(&self.config.theme.heading_color),
                     code_color: markdown::color_from_str(&self.config.theme.code_color),
+                    image_height: self.config.theme.image_height,
                 };
                 markdown::parse_with_config(content, &cfg)
                     .iter()
@@ -367,11 +378,13 @@ impl App {
         self.load_error = None;
     }
 
-    pub fn set_content(&mut self, content: String, name: String) {
+    pub fn set_content(&mut self, content: String, name: String, base_dir: Option<PathBuf>) {
         self.content = Some(content);
         self.file_name = Some(name);
+        self.base_dir = base_dir;
         self.scroll = 0;
         self.state = AppState::Viewing;
+        self.image_cache.clear();
     }
 
     pub fn set_error(&mut self, err: String) {
