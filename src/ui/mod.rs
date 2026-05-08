@@ -10,7 +10,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let (main_area, status_area, error_area) = split_layout(area, app);
 
@@ -30,8 +30,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
-fn draw_browsing(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(tree) = &app.tree else {
+fn draw_browsing(frame: &mut Frame, area: Rect, app: &mut App) {
+    let Some(tree) = app.tree.clone() else {
         let widget = Paragraph::new("No directory loaded")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
@@ -44,45 +44,42 @@ fn draw_browsing(frame: &mut Frame, area: Rect, app: &App) {
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
         .split(area);
 
-    file_tree::render(frame, chunks[0], tree, app.tree_cursor);
+    file_tree::render(frame, chunks[0], &tree, app.tree_cursor);
 
-    if let Some(content) = &app.content {
-        let lines = markdown::parse_with_config(content, &render_config(app));
-        let widget = build_preview(
-            &lines,
-            app.scroll,
-            app.file_name.as_deref().unwrap_or(""),
-            app,
-        );
-        frame.render_widget(widget, chunks[1]);
+    if app.content.is_some() {
+        render_preview(frame, chunks[1], app);
     }
 }
 
-fn draw_viewing(frame: &mut Frame, area: Rect, app: &App) {
-    let content = app.content.as_deref().unwrap_or("");
-    let lines = markdown::parse_with_config(content, &render_config(app));
-    let widget = build_preview(
-        &lines,
-        app.scroll,
-        app.file_name.as_deref().unwrap_or("untitled"),
-        app,
-    );
-    frame.render_widget(widget, area);
+fn draw_viewing(frame: &mut Frame, area: Rect, app: &mut App) {
+    render_preview(frame, area, app);
 }
 
-fn build_preview<'a>(
-    lines: &'a [ratatui::text::Line<'static>],
-    scroll: u16,
-    title: &'a str,
-    app: &'a App,
-) -> preview::PreviewWidget<'a> {
-    preview::PreviewWidget {
-        lines,
-        scroll,
-        title,
+fn render_preview(frame: &mut Frame, area: Rect, app: &mut App) {
+    let content = app.content.clone().unwrap_or_default();
+    let cfg = render_config(app);
+    let base_dir = app.base_dir.clone();
+    let result = markdown::parse_full_with(&content, &cfg, base_dir.as_deref());
+    let title = app
+        .file_name
+        .clone()
+        .unwrap_or_else(|| "untitled".to_string());
+
+    let params = preview::PreviewParams {
+        lines: &result.lines,
+        images: &result.images,
+        scroll: app.scroll,
+        title: &title,
         show_line_numbers: app.config.theme.show_line_numbers,
         line_number_color: markdown::color_from_str(&app.config.theme.line_number_color),
-    }
+    };
+    preview::render(
+        frame,
+        area,
+        params,
+        app.picker.as_ref(),
+        &mut app.image_cache,
+    );
 }
 
 fn draw_loading(frame: &mut Frame, area: Rect) {
@@ -151,5 +148,6 @@ fn render_config(app: &App) -> markdown::RenderConfig {
     markdown::RenderConfig {
         heading_color: markdown::color_from_str(&app.config.theme.heading_color),
         code_color: markdown::color_from_str(&app.config.theme.code_color),
+        image_height: app.config.theme.image_height,
     }
 }

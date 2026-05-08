@@ -21,7 +21,11 @@ struct Cli {
 }
 
 enum LoadMsg {
-    Content { name: String, content: String },
+    Content {
+        name: String,
+        content: String,
+        base_dir: Option<PathBuf>,
+    },
     Error(String),
 }
 
@@ -35,6 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(ref path) if path.is_file() => match fs::read_file(path.to_str().unwrap_or("")) {
             Ok(content) => {
                 app.file_name = path.file_name().and_then(|n| n.to_str()).map(String::from);
+                app.base_dir = path.parent().map(|p| p.to_path_buf());
                 app.content = Some(content);
                 app.state = AppState::Viewing;
             }
@@ -68,6 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (tx, rx) = mpsc::channel::<LoadMsg>();
     let mut terminal = ratatui::init();
+    app.picker = ratatui_image::picker::Picker::from_query_stdio().ok();
     let result = run(&mut terminal, &mut app, tx, rx);
     ratatui::restore();
     result
@@ -82,7 +88,11 @@ fn run(
     while app.running {
         while let Ok(msg) = rx.try_recv() {
             match msg {
-                LoadMsg::Content { name, content } => app.set_content(content, name),
+                LoadMsg::Content {
+                    name,
+                    content,
+                    base_dir,
+                } => app.set_content(content, name, base_dir),
                 LoadMsg::Error(e) => app.set_error(e),
             }
         }
@@ -215,13 +225,18 @@ fn spawn_load(app: &mut App, tx: &mpsc::Sender<LoadMsg>) {
         .and_then(|n| n.to_str())
         .unwrap_or("?")
         .to_string();
+    let base_dir = path.parent().map(|p| p.to_path_buf());
     let path = path.clone();
     let tx = tx.clone();
     app.set_loading();
     tokio::spawn(async move {
         match fs::read_file_async(path).await {
             Ok(content) => {
-                let _ = tx.send(LoadMsg::Content { name, content });
+                let _ = tx.send(LoadMsg::Content {
+                    name,
+                    content,
+                    base_dir,
+                });
             }
             Err(e) => {
                 let _ = tx.send(LoadMsg::Error(e.to_string()));

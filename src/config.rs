@@ -31,6 +31,8 @@ pub struct ThemeConfig {
     pub line_number_color: String,
     #[serde(default = "default_show_line_numbers")]
     pub show_line_numbers: bool,
+    #[serde(default = "default_image_height")]
+    pub image_height: u16,
 }
 
 fn default_line_number_color() -> String {
@@ -39,6 +41,10 @@ fn default_line_number_color() -> String {
 
 fn default_show_line_numbers() -> bool {
     true
+}
+
+fn default_image_height() -> u16 {
+    12
 }
 
 // Accepts either `quit = "q"` or `down = ["j", "Down"]` in TOML.
@@ -66,6 +72,7 @@ impl Default for Config {
                 code_color: "yellow".to_string(),
                 line_number_color: default_line_number_color(),
                 show_line_numbers: default_show_line_numbers(),
+                image_height: default_image_height(),
             },
             keys: HashMap::from([
                 ("quit".to_string(), KeyBinding::Single("q".to_string())),

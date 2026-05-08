@@ -2,10 +2,13 @@
 
 A terminal markdown reader with vi-style keybindings.
 
+![mdr screenshot](docs/assets/screenshot.png)
+
 ## Features
 
 - Browse a directory tree, preview markdown files in a side panel
 - Pretty rendering: headings with underlines, styled inline code, aligned tables with borders, italics/bold
+- Inline images via the Kitty graphics protocol (Kitty / Ghostty / WezTerm); other terminals show an alt-text placeholder
 - Vi-style keys: `j`/`k`, count prefixes (`5j`, `12k`), `/` and `?` search, `n`/`N` repeat
 - Configurable theme and key bindings via `~/.config/mdr/config.toml`
 - Async file loading with `tokio`
@@ -52,6 +55,7 @@ heading_color = "blue"
 code_color = "green"
 line_number_color = "darkgray"   # default
 show_line_numbers = true         # default
+image_height = 12                # default — rows reserved per inline image
 
 [keys]
 quit = "Q"               # string form

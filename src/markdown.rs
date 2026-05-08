@@ -3,10 +3,12 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use std::path::{Path, PathBuf};
 
 pub struct RenderConfig {
     pub heading_color: Color,
     pub code_color: Color,
+    pub image_height: u16,
 }
 
 impl Default for RenderConfig {
@@ -14,8 +16,25 @@ impl Default for RenderConfig {
         Self {
             heading_color: Color::Cyan,
             code_color: Color::Yellow,
+            image_height: 12,
         }
     }
+}
+
+/// A reference to an image embedded in the rendered output.
+/// `line_offset` is the row index within the rendered `lines` where the image
+/// starts; the image occupies `height` rows. `alt` is the markdown alt text.
+#[derive(Debug, Clone)]
+pub struct ImageRef {
+    pub path: PathBuf,
+    pub line_offset: usize,
+    pub height: u16,
+}
+
+#[derive(Debug, Default)]
+pub struct ParseResult {
+    pub lines: Vec<Line<'static>>,
+    pub images: Vec<ImageRef>,
 }
 
 pub fn color_from_str(s: &str) -> Color {
@@ -39,6 +58,11 @@ pub fn parse(content: &str) -> Vec<Line<'static>> {
     parse_with_config(content, &RenderConfig::default())
 }
 
+#[cfg(test)]
+pub fn parse_full(content: &str) -> ParseResult {
+    parse_full_with(content, &RenderConfig::default(), None)
+}
+
 #[derive(Default)]
 struct TableBuf {
     head: Vec<Vec<Span<'static>>>,
@@ -49,16 +73,72 @@ struct TableBuf {
 }
 
 pub fn parse_with_config(content: &str, config: &RenderConfig) -> Vec<Line<'static>> {
+    parse_full_with(content, config, None).lines
+}
+
+/// Parse markdown into both rendered lines and the image references that
+/// occur inside them. `base_dir` is the directory the markdown file lives in;
+/// relative image paths are resolved against it. URLs are kept verbatim and
+/// rendered as alt text only (no fetching).
+pub fn parse_full_with(
+    content: &str,
+    config: &RenderConfig,
+    base_dir: Option<&Path>,
+) -> ParseResult {
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut images: Vec<ImageRef> = Vec::new();
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut current_style = Style::default();
     let mut current_heading: Option<HeadingLevel> = None;
     let mut table: Option<TableBuf> = None;
     let mut in_code_block = false;
+    let mut current_image: Option<PendingImage> = None;
 
     let parser = Parser::new_ext(content, Options::all());
     for event in parser {
         match event {
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                current_image = Some(PendingImage {
+                    dest: dest_url.to_string(),
+                    alt: String::new(),
+                });
+            }
+            Event::End(TagEnd::Image) => {
+                if let Some(img) = current_image.take() {
+                    flush_block(&mut spans, &mut lines);
+                    let resolved = resolve_image_path(&img.dest, base_dir);
+                    let height = config.image_height.max(1);
+                    let line_offset = lines.len();
+                    let alt_label = if img.alt.is_empty() {
+                        match resolved.as_ref() {
+                            Some(p) => p
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("image")
+                                .to_string(),
+                            None => img.dest.clone(),
+                        }
+                    } else {
+                        img.alt.clone()
+                    };
+                    let placeholder_text = format!("[image: {}]", alt_label);
+                    lines.push(Line::from(Span::styled(
+                        placeholder_text,
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                    for _ in 1..height {
+                        lines.push(Line::default());
+                    }
+                    lines.push(Line::default());
+                    if let Some(path) = resolved {
+                        images.push(ImageRef {
+                            path,
+                            line_offset,
+                            height,
+                        });
+                    }
+                }
+            }
             Event::Start(Tag::Heading { level, .. }) => {
                 flush_block(&mut spans, &mut lines);
                 blank_before_heading(&mut lines, level);
@@ -91,6 +171,11 @@ pub fn parse_with_config(content: &str, config: &RenderConfig) -> Vec<Line<'stat
                 }
                 lines.push(Line::default());
                 in_code_block = false;
+            }
+            Event::Text(text) if current_image.is_some() => {
+                if let Some(img) = current_image.as_mut() {
+                    img.alt.push_str(&text);
+                }
             }
             Event::Text(text) if in_code_block => {
                 let style = Style::default().fg(config.code_color);
@@ -180,7 +265,24 @@ pub fn parse_with_config(content: &str, config: &RenderConfig) -> Vec<Line<'stat
         lines.push(Line::from(spans));
     }
 
-    lines
+    ParseResult { lines, images }
+}
+
+struct PendingImage {
+    dest: String,
+    alt: String,
+}
+
+fn resolve_image_path(dest: &str, base_dir: Option<&Path>) -> Option<PathBuf> {
+    if dest.starts_with("http://") || dest.starts_with("https://") {
+        return None;
+    }
+    let p = PathBuf::from(dest);
+    if p.is_absolute() {
+        return Some(p);
+    }
+    let base = base_dir?;
+    Some(base.join(p))
 }
 
 fn push_span(span: Span<'static>, spans: &mut Vec<Span<'static>>, table: &mut Option<TableBuf>) {
@@ -376,6 +478,7 @@ mod tests {
         let cfg = RenderConfig {
             heading_color: Color::Red,
             code_color: Color::Green,
+            image_height: 12,
         };
         let lines = parse_with_config("# H", &cfg);
         let span = lines
@@ -497,6 +600,7 @@ mod tests {
         let cfg = RenderConfig {
             heading_color: Color::Cyan,
             code_color: Color::Magenta,
+            image_height: 12,
         };
         let lines = parse_with_config("```\nhello\n```\n", &cfg);
         let span = lines
@@ -561,6 +665,50 @@ mod tests {
         });
         assert!(has_top, "expected top border with ┌ and ┐");
         assert!(has_bottom, "expected bottom border with └ and ┘");
+    }
+
+    #[test]
+    fn test_image_local_path_resolves_relative_to_base_dir() {
+        let cfg = RenderConfig {
+            heading_color: Color::Cyan,
+            code_color: Color::Yellow,
+            image_height: 5,
+        };
+        let base = Path::new("/some/dir");
+        let result = parse_full_with("![alt](pic.png)", &cfg, Some(base));
+        assert_eq!(result.images.len(), 1);
+        assert_eq!(result.images[0].path, PathBuf::from("/some/dir/pic.png"));
+        assert_eq!(result.images[0].height, 5);
+    }
+
+    #[test]
+    fn test_image_url_is_dropped_but_alt_still_rendered() {
+        let result = parse_full("![remote](https://example.com/x.png)");
+        assert!(result.images.is_empty());
+        let placeholder = result
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.contains("[image:") && s.content.contains("remote"));
+        assert!(
+            placeholder.is_some(),
+            "expected alt-text placeholder for url"
+        );
+    }
+
+    #[test]
+    fn test_image_reserves_height_rows_in_lines() {
+        let cfg = RenderConfig {
+            heading_color: Color::Cyan,
+            code_color: Color::Yellow,
+            image_height: 8,
+        };
+        let result = parse_full_with("![alt](pic.png)", &cfg, Some(Path::new("/a")));
+        let img = &result.images[0];
+        assert_eq!(img.line_offset, 0);
+        // First row has placeholder, next height-1 rows are blank.
+        let total_rows_after_image = result.lines.len();
+        assert!(total_rows_after_image >= 8, "expected >=8 lines for image");
     }
 
     #[test]
