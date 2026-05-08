@@ -32,7 +32,10 @@ mdr file.md          # open a file directly
 |--------------------|-----------------------------------------------|
 | `j` / `Down`       | move down (accepts count, e.g. `5j`)          |
 | `k` / `Up`         | move up                                       |
-| `g`                | jump to top                                   |
+| `g`                | jump to first line                            |
+| `Ng`               | jump to line N (e.g. `42g`)                   |
+| `G`                | jump to last line                             |
+| `Ctrl+d` / `Ctrl+u` | half-page down / up                          |
 | `Enter` / `l` / `Right` | activate (open file or expand directory) |
 | `Esc` / `h` / `Left`    | back / collapse directory                |
 | `/` / `?`          | search forward / backward                     |
