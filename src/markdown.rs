@@ -690,7 +690,10 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter())
             .find(|s| s.content.contains("[image:") && s.content.contains("remote"));
-        assert!(placeholder.is_some(), "expected alt-text placeholder for url");
+        assert!(
+            placeholder.is_some(),
+            "expected alt-text placeholder for url"
+        );
     }
 
     #[test]

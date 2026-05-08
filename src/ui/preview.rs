@@ -73,11 +73,23 @@ pub fn render(
     if let Some(picker) = picker
         && picker.protocol_type() == ratatui_image::picker::ProtocolType::Kitty
     {
-        render_images(frame, body_area, params.images, params.scroll, picker, image_cache);
+        render_images(
+            frame,
+            body_area,
+            params.images,
+            params.scroll,
+            picker,
+            image_cache,
+        );
     }
 }
 
-fn compute_image_rows(total_lines: usize, images: &[ImageRef], _scroll: u16, _body: Rect) -> Vec<bool> {
+fn compute_image_rows(
+    total_lines: usize,
+    images: &[ImageRef],
+    _scroll: u16,
+    _body: Rect,
+) -> Vec<bool> {
     let mut v = vec![false; total_lines];
     for img in images {
         let start = img.line_offset.min(total_lines);
