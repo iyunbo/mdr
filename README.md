@@ -50,6 +50,8 @@ mdr file.md          # open a file directly
 [theme]
 heading_color = "blue"
 code_color = "green"
+line_number_color = "darkgray"   # default
+show_line_numbers = true         # default
 
 [keys]
 quit = "Q"               # string form

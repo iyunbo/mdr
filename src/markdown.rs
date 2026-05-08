@@ -29,6 +29,7 @@ pub fn color_from_str(s: &str) -> Color {
         "white" => Color::White,
         "black" => Color::Black,
         "gray" | "grey" => Color::Gray,
+        "darkgray" | "dark_gray" | "darkgrey" | "dark_grey" => Color::DarkGray,
         _ => Color::White,
     }
 }

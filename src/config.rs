@@ -27,6 +27,18 @@ pub struct Config {
 pub struct ThemeConfig {
     pub heading_color: String,
     pub code_color: String,
+    #[serde(default = "default_line_number_color")]
+    pub line_number_color: String,
+    #[serde(default = "default_show_line_numbers")]
+    pub show_line_numbers: bool,
+}
+
+fn default_line_number_color() -> String {
+    "darkgray".to_string()
+}
+
+fn default_show_line_numbers() -> bool {
+    true
 }
 
 // Accepts either `quit = "q"` or `down = ["j", "Down"]` in TOML.
@@ -52,6 +64,8 @@ impl Default for Config {
             theme: ThemeConfig {
                 heading_color: "cyan".to_string(),
                 code_color: "yellow".to_string(),
+                line_number_color: default_line_number_color(),
+                show_line_numbers: default_show_line_numbers(),
             },
             keys: HashMap::from([
                 ("quit".to_string(), KeyBinding::Single("q".to_string())),

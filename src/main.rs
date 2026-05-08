@@ -125,7 +125,10 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &mpsc::Sender<LoadMsg>, term_hei
 
     let count = app.take_count() as usize;
 
-    if let Some(&action) = app.keymap.get(&(key.code, key.modifiers)) {
+    if let Some(&action) = app
+        .keymap
+        .get(&keys::normalize_combo(key.code, key.modifiers))
+    {
         // Clear ephemeral status the moment a real action fires.
         app.status_message = None;
         let half_page = ((term_height.saturating_sub(2) / 2) as usize).max(1);

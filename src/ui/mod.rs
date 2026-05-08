@@ -48,11 +48,12 @@ fn draw_browsing(frame: &mut Frame, area: Rect, app: &App) {
 
     if let Some(content) = &app.content {
         let lines = markdown::parse_with_config(content, &render_config(app));
-        let widget = preview::PreviewWidget {
-            lines: &lines,
-            scroll: app.scroll,
-            title: app.file_name.as_deref().unwrap_or(""),
-        };
+        let widget = build_preview(
+            &lines,
+            app.scroll,
+            app.file_name.as_deref().unwrap_or(""),
+            app,
+        );
         frame.render_widget(widget, chunks[1]);
     }
 }
@@ -60,12 +61,28 @@ fn draw_browsing(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_viewing(frame: &mut Frame, area: Rect, app: &App) {
     let content = app.content.as_deref().unwrap_or("");
     let lines = markdown::parse_with_config(content, &render_config(app));
-    let widget = preview::PreviewWidget {
-        lines: &lines,
-        scroll: app.scroll,
-        title: app.file_name.as_deref().unwrap_or("untitled"),
-    };
+    let widget = build_preview(
+        &lines,
+        app.scroll,
+        app.file_name.as_deref().unwrap_or("untitled"),
+        app,
+    );
     frame.render_widget(widget, area);
+}
+
+fn build_preview<'a>(
+    lines: &'a [ratatui::text::Line<'static>],
+    scroll: u16,
+    title: &'a str,
+    app: &'a App,
+) -> preview::PreviewWidget<'a> {
+    preview::PreviewWidget {
+        lines,
+        scroll,
+        title,
+        show_line_numbers: app.config.theme.show_line_numbers,
+        line_number_color: markdown::color_from_str(&app.config.theme.line_number_color),
+    }
 }
 
 fn draw_loading(frame: &mut Frame, area: Rect) {
