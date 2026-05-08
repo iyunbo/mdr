@@ -1,9 +1,8 @@
 use crate::config::Config;
 use crate::error::AppError;
 use crate::fs::{self, FileNode};
-use crate::keys::{self, Action};
+use crate::keys::{self, Action, KeyCombo};
 use crate::markdown;
-use crossterm::event::KeyCode;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +34,7 @@ pub struct App {
     pub tree: Option<FileNode>,
     pub tree_cursor: usize,
     pub config: Config,
-    pub keymap: HashMap<KeyCode, Action>,
+    pub keymap: HashMap<KeyCombo, Action>,
     pub load_error: Option<String>,
     pub count_buffer: String,
     pub search_input: Option<SearchInput>,
@@ -95,6 +94,88 @@ impl App {
 
     pub fn cursor_top(&mut self) {
         self.tree_cursor = 0;
+    }
+
+    /// Jump to line `n` (1-indexed) in the current view. `n == 0` is
+    /// treated as line 1.
+    pub fn goto_line(&mut self, n: usize) {
+        let idx = n.saturating_sub(1);
+        match self.state {
+            AppState::Viewing => {
+                let max = self.total_lines().saturating_sub(1);
+                self.scroll = idx.min(max) as u16;
+            }
+            AppState::Browsing => {
+                let max = self
+                    .tree
+                    .as_ref()
+                    .map(Self::flat_len)
+                    .unwrap_or(0)
+                    .saturating_sub(1);
+                self.tree_cursor = idx.min(max);
+            }
+            AppState::Loading => {}
+        }
+    }
+
+    /// Jump to the last line / item.
+    pub fn goto_bottom(&mut self, page_size: usize) {
+        match self.state {
+            AppState::Viewing => {
+                let total = self.total_lines();
+                self.scroll = total.saturating_sub(page_size) as u16;
+            }
+            AppState::Browsing => {
+                let max = self
+                    .tree
+                    .as_ref()
+                    .map(Self::flat_len)
+                    .unwrap_or(0)
+                    .saturating_sub(1);
+                self.tree_cursor = max;
+            }
+            AppState::Loading => {}
+        }
+    }
+
+    pub fn half_page_down(&mut self, half_page: usize) {
+        match self.state {
+            AppState::Viewing => {
+                let max = self.total_lines().saturating_sub(1) as u16;
+                self.scroll = self.scroll.saturating_add(half_page as u16).min(max);
+            }
+            AppState::Browsing => {
+                let max = self
+                    .tree
+                    .as_ref()
+                    .map(Self::flat_len)
+                    .unwrap_or(0)
+                    .saturating_sub(1);
+                self.tree_cursor = (self.tree_cursor + half_page).min(max);
+            }
+            AppState::Loading => {}
+        }
+    }
+
+    pub fn half_page_up(&mut self, half_page: usize) {
+        match self.state {
+            AppState::Viewing => {
+                self.scroll = self.scroll.saturating_sub(half_page as u16);
+            }
+            AppState::Browsing => {
+                self.tree_cursor = self.tree_cursor.saturating_sub(half_page);
+            }
+            AppState::Loading => {}
+        }
+    }
+
+    fn total_lines(&self) -> usize {
+        let content = self.content.as_deref().unwrap_or("");
+        let cfg = markdown::RenderConfig {
+            heading_color: markdown::color_from_str(&self.config.theme.heading_color),
+            code_color: markdown::color_from_str(&self.config.theme.code_color),
+        };
+        markdown::parse_with_config(content, &cfg).len()
     }
 
     /// Append a digit to the count buffer (used for vi-style `Nj`, `Nk`).
@@ -468,6 +549,59 @@ mod tests {
         app.toggle_selected().unwrap();
         // After expanding `sub`, its `inner.md` should appear.
         assert_eq!(App::flat_len(app.tree.as_ref().unwrap()), 3);
+    }
+
+    #[test]
+    fn test_goto_line_in_browsing_clamps() {
+        let dir = tempfile::tempdir().unwrap();
+        stdfs::write(dir.path().join("a.md"), "a").unwrap();
+        stdfs::write(dir.path().join("b.md"), "b").unwrap();
+        stdfs::write(dir.path().join("c.md"), "c").unwrap();
+        let tree = fs::walk_dir(dir.path()).unwrap();
+        let mut app = make_app_with_tree(tree);
+        // Flat list: root, a.md, b.md, c.md (4 items, indices 0..3)
+        app.goto_line(3);
+        assert_eq!(app.tree_cursor, 2);
+        // Out-of-range clamps
+        app.goto_line(99);
+        assert_eq!(app.tree_cursor, 3);
+        // 0 or 1 -> first
+        app.goto_line(0);
+        assert_eq!(app.tree_cursor, 0);
+        app.goto_line(1);
+        assert_eq!(app.tree_cursor, 0);
+    }
+
+    #[test]
+    fn test_goto_bottom_in_browsing() {
+        let dir = tempfile::tempdir().unwrap();
+        stdfs::write(dir.path().join("a.md"), "a").unwrap();
+        stdfs::write(dir.path().join("b.md"), "b").unwrap();
+        let tree = fs::walk_dir(dir.path()).unwrap();
+        let mut app = make_app_with_tree(tree);
+        app.goto_bottom(10);
+        // Last index is flat_len - 1 = 2
+        assert_eq!(app.tree_cursor, 2);
+    }
+
+    #[test]
+    fn test_half_page_down_up_in_browsing() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..10 {
+            stdfs::write(dir.path().join(format!("f{:02}.md", i)), "x").unwrap();
+        }
+        let tree = fs::walk_dir(dir.path()).unwrap();
+        let mut app = make_app_with_tree(tree);
+        app.half_page_down(5);
+        assert_eq!(app.tree_cursor, 5);
+        app.half_page_up(2);
+        assert_eq!(app.tree_cursor, 3);
+        // saturate at 0
+        app.half_page_up(100);
+        assert_eq!(app.tree_cursor, 0);
+        // saturate at top
+        app.half_page_down(1000);
+        assert_eq!(app.tree_cursor, 10); // flat_len - 1 = 11 items - 1 = 10
     }
 
     #[test]

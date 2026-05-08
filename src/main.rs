@@ -96,18 +96,13 @@ fn run(
             continue;
         };
 
-        handle_key(app, key, &tx);
+        let term_size = terminal.size().unwrap_or_default();
+        handle_key(app, key, &tx, term_size.height);
     }
     Ok(())
 }
 
-fn handle_key(app: &mut App, key: KeyEvent, tx: &mpsc::Sender<LoadMsg>) {
-    // Hardcoded fallback: Ctrl+C always quits.
-    if matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL) {
-        app.quit();
-        return;
-    }
-
+fn handle_key(app: &mut App, key: KeyEvent, tx: &mpsc::Sender<LoadMsg>, term_height: u16) {
     // Search input mode captures all keys.
     if app.search_input.is_some() {
         match key.code {
@@ -120,30 +115,50 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &mpsc::Sender<LoadMsg>) {
         return;
     }
 
-    // Number prefix: digits accumulate into the count buffer.
-    if let KeyCode::Char(c) = key.code
+    // Number prefix: digits accumulate into the count buffer (no modifiers).
+    if key.modifiers == KeyModifiers::NONE
+        && let KeyCode::Char(c) = key.code
         && app.push_count_digit(c)
     {
         return;
     }
 
-    // Action dispatch.
     let count = app.take_count() as usize;
-    if let Some(&action) = app.keymap.get(&key.code) {
+
+    if let Some(&action) = app.keymap.get(&(key.code, key.modifiers)) {
         // Clear ephemeral status the moment a real action fires.
         app.status_message = None;
-        dispatch(app, action, tx, count);
+        let half_page = ((term_height.saturating_sub(2) / 2) as usize).max(1);
+        let page = (term_height.saturating_sub(2) as usize).max(1);
+        dispatch(app, action, tx, count, half_page, page);
+        return;
+    }
+
+    // Hardcoded fallback: Ctrl+C always quits, even if not in keymap.
+    if matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.quit();
     }
 }
 
-fn dispatch(app: &mut App, action: Action, tx: &mpsc::Sender<LoadMsg>, count: usize) {
+fn dispatch(
+    app: &mut App,
+    action: Action,
+    tx: &mpsc::Sender<LoadMsg>,
+    count: usize,
+    half_page: usize,
+    page: usize,
+) {
     let count = count.max(1);
     match (app.state, action) {
         (_, Action::Quit) => app.quit(),
         (AppState::Loading, _) => {}
         (AppState::Viewing, Action::Down) => repeat(count, || app.scroll_down()),
         (AppState::Viewing, Action::Up) => repeat(count, || app.scroll_up()),
+        (_, Action::Top) if count > 1 => app.goto_line(count),
         (AppState::Viewing, Action::Top) => app.scroll_top(),
+        (_, Action::Bottom) => app.goto_bottom(page),
+        (_, Action::HalfPageDown) => app.half_page_down(half_page * count),
+        (_, Action::HalfPageUp) => app.half_page_up(half_page * count),
         (AppState::Viewing, Action::Back) => {
             if app.tree.is_some() {
                 app.state = AppState::Browsing;

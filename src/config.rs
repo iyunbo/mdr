@@ -96,6 +96,15 @@ impl Default for Config {
                     "repeat_prev".to_string(),
                     KeyBinding::Single("N".to_string()),
                 ),
+                ("bottom".to_string(), KeyBinding::Single("G".to_string())),
+                (
+                    "halfpage_down".to_string(),
+                    KeyBinding::Single("Ctrl+d".to_string()),
+                ),
+                (
+                    "halfpage_up".to_string(),
+                    KeyBinding::Single("Ctrl+u".to_string()),
+                ),
             ]),
         }
     }
