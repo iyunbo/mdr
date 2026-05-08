@@ -21,6 +21,18 @@ pub enum Action {
 
 pub type KeyCombo = (KeyCode, KeyModifiers);
 
+/// Normalize a (KeyCode, KeyModifiers) pair so character keys never
+/// carry the SHIFT modifier — the case is already encoded in the char,
+/// but terminals report shifted ASCII as `Char('G') + SHIFT` on most
+/// platforms which would otherwise miss a `G` keymap entry.
+pub fn normalize_combo(code: KeyCode, mods: KeyModifiers) -> KeyCombo {
+    let mut m = mods;
+    if matches!(code, KeyCode::Char(_)) {
+        m.remove(KeyModifiers::SHIFT);
+    }
+    (code, m)
+}
+
 /// Parse a key string. Supports plain keys (`q`, `Enter`, `Down`) and
 /// modifier prefixes joined by `+` (e.g. `Ctrl+d`, `Shift+Tab`).
 pub fn parse_key(s: &str) -> Option<KeyCombo> {
@@ -40,7 +52,7 @@ pub fn parse_key(s: &str) -> Option<KeyCombo> {
         }
     }
     let code = parse_key_code(last)?;
-    Some((code, mods))
+    Some(normalize_combo(code, mods))
 }
 
 fn parse_key_code(s: &str) -> Option<KeyCode> {
@@ -141,6 +153,18 @@ mod tests {
             parse_key("Alt+Enter"),
             Some((KeyCode::Enter, KeyModifiers::ALT))
         );
+    }
+
+    #[test]
+    fn test_normalize_strips_shift_from_char_keys() {
+        // Capital G typed as Shift+g should match a 'G' binding.
+        let (code, mods) = normalize_combo(KeyCode::Char('G'), KeyModifiers::SHIFT);
+        assert_eq!(code, KeyCode::Char('G'));
+        assert_eq!(mods, KeyModifiers::NONE);
+        // SHIFT is preserved on non-Char keys (e.g. Shift+Tab).
+        let (code, mods) = normalize_combo(KeyCode::Tab, KeyModifiers::SHIFT);
+        assert_eq!(code, KeyCode::Tab);
+        assert_eq!(mods, KeyModifiers::SHIFT);
     }
 
     #[test]
