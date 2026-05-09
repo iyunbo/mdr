@@ -2,7 +2,7 @@ pub mod file_tree;
 pub mod preview;
 
 use crate::app::{App, AppState, SearchDirection};
-use crate::markdown;
+use crate::markdown::color_from_str;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -36,6 +36,7 @@ fn draw_browsing(frame: &mut Frame, area: Rect, app: &mut App) {
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
         frame.render_widget(widget, area);
+        app.last_preview_body = None;
         return;
     };
 
@@ -48,6 +49,8 @@ fn draw_browsing(frame: &mut Frame, area: Rect, app: &mut App) {
 
     if app.content.is_some() {
         render_preview(frame, chunks[1], app);
+    } else {
+        app.last_preview_body = None;
     }
 }
 
@@ -56,10 +59,7 @@ fn draw_viewing(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn render_preview(frame: &mut Frame, area: Rect, app: &mut App) {
-    let content = app.content.clone().unwrap_or_default();
-    let cfg = render_config(app);
-    let base_dir = app.base_dir.clone();
-    let result = markdown::parse_full_with(&content, &cfg, base_dir.as_deref());
+    let result = app.parse_current();
     let title = app
         .file_name
         .clone()
@@ -68,18 +68,22 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &mut App) {
     let params = preview::PreviewParams {
         lines: &result.lines,
         images: &result.images,
+        links: &result.links,
+        selected_link: app.selected_link,
         scroll: app.scroll,
         title: &title,
         show_line_numbers: app.config.theme.show_line_numbers,
-        line_number_color: markdown::color_from_str(&app.config.theme.line_number_color),
+        line_number_color: color_from_str(&app.config.theme.line_number_color),
     };
-    preview::render(
+    let rendered = preview::render(
         frame,
         area,
         params,
         app.picker.as_ref(),
         &mut app.image_cache,
     );
+    app.last_preview_body = Some(rendered.body_area);
+    app.last_gutter_width = rendered.gutter_width;
 }
 
 fn draw_loading(frame: &mut Frame, area: Rect) {
@@ -100,6 +104,12 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(widget, area);
         return;
     }
+    if let Some(prompt) = &app.line_prompt {
+        let text = format!(":{}", prompt.buffer);
+        let widget = Paragraph::new(text).style(Style::default().fg(Color::Yellow));
+        frame.render_widget(widget, area);
+        return;
+    }
     if let Some(msg) = &app.status_message {
         let widget = Paragraph::new(msg.clone()).style(Style::default().fg(Color::Red));
         frame.render_widget(widget, area);
@@ -114,8 +124,10 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn split_layout(area: Rect, app: &App) -> (Rect, Option<Rect>, Option<Rect>) {
-    let want_status =
-        app.search_input.is_some() || app.status_message.is_some() || !app.count_buffer.is_empty();
+    let want_status = app.search_input.is_some()
+        || app.line_prompt.is_some()
+        || app.status_message.is_some()
+        || !app.count_buffer.is_empty();
     let want_error = app.load_error.is_some();
 
     let mut constraints: Vec<Constraint> = vec![Constraint::Min(0)];
@@ -142,12 +154,4 @@ fn split_layout(area: Rect, app: &App) -> (Rect, Option<Rect>, Option<Rect>) {
     };
     let error = if want_error { Some(chunks[idx]) } else { None };
     (main, status, error)
-}
-
-fn render_config(app: &App) -> markdown::RenderConfig {
-    markdown::RenderConfig {
-        heading_color: markdown::color_from_str(&app.config.theme.heading_color),
-        code_color: markdown::color_from_str(&app.config.theme.code_color),
-        image_height: app.config.theme.image_height,
-    }
 }

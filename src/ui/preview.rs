@@ -1,4 +1,4 @@
-use crate::markdown::ImageRef;
+use crate::markdown::{ImageRef, LinkRef};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -13,10 +13,17 @@ use std::path::PathBuf;
 pub struct PreviewParams<'a> {
     pub lines: &'a [Line<'static>],
     pub images: &'a [ImageRef],
+    pub links: &'a [LinkRef],
+    pub selected_link: Option<usize>,
     pub scroll: u16,
     pub title: &'a str,
     pub show_line_numbers: bool,
     pub line_number_color: Color,
+}
+
+pub struct RenderedPreview {
+    pub body_area: Rect,
+    pub gutter_width: u16,
 }
 
 pub fn render(
@@ -25,7 +32,7 @@ pub fn render(
     params: PreviewParams<'_>,
     picker: Option<&Picker>,
     image_cache: &mut HashMap<PathBuf, StatefulProtocol>,
-) {
+) -> RenderedPreview {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
@@ -43,7 +50,19 @@ pub fn render(
     let image_rows: Vec<bool> =
         compute_image_rows(params.lines.len(), params.images, params.scroll, body_area);
 
-    if params.show_line_numbers {
+    let selected = params
+        .selected_link
+        .and_then(|i| params.links.get(i))
+        .filter(|link| link.line < params.lines.len());
+
+    let render_line = |i: usize, line: &Line<'static>| -> Line<'static> {
+        match selected {
+            Some(link) if link.line == i => highlight_range(line, link.col_start, link.col_end),
+            _ => line.clone(),
+        }
+    };
+
+    let gutter_width: u16 = if params.show_line_numbers {
         let total = params.lines.len();
         let digits = total.to_string().len().max(2);
         let num_style = Style::default().fg(params.line_number_color);
@@ -52,23 +71,32 @@ pub fn render(
             .iter()
             .enumerate()
             .map(|(i, line)| {
-                let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 1);
+                let rendered = render_line(i, line);
+                let mut spans: Vec<Span<'static>> = Vec::with_capacity(rendered.spans.len() + 1);
                 let prefix = if image_rows.get(i).copied().unwrap_or(false) {
                     " ".repeat(digits + 1)
                 } else {
                     format!("{:>width$} ", i + 1, width = digits)
                 };
                 spans.push(Span::styled(prefix, num_style));
-                spans.extend(line.spans.iter().cloned());
+                spans.extend(rendered.spans);
                 Line::from(spans)
             })
             .collect();
         let paragraph = Paragraph::new(numbered).scroll((params.scroll, 0));
         frame.render_widget(paragraph, body_area);
+        (digits + 1) as u16
     } else {
-        let paragraph = Paragraph::new(params.lines.to_vec()).scroll((params.scroll, 0));
+        let lines: Vec<Line<'static>> = params
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| render_line(i, line))
+            .collect();
+        let paragraph = Paragraph::new(lines).scroll((params.scroll, 0));
         frame.render_widget(paragraph, body_area);
-    }
+        0
+    };
 
     if let Some(picker) = picker
         && picker.protocol_type() == ratatui_image::picker::ProtocolType::Kitty
@@ -81,6 +109,11 @@ pub fn render(
             picker,
             image_cache,
         );
+    }
+
+    RenderedPreview {
+        body_area,
+        gutter_width,
     }
 }
 
@@ -156,6 +189,44 @@ fn render_images(
 
 fn compute_gutter_width(_images: &[ImageRef]) -> u16 {
     0
+}
+
+/// Apply `Modifier::REVERSED` to the character range `[col_start, col_end)` of
+/// `line`, splitting spans as needed. Used to highlight the currently selected
+/// link in the preview pane.
+fn highlight_range(line: &Line<'static>, col_start: usize, col_end: usize) -> Line<'static> {
+    if col_start >= col_end {
+        return line.clone();
+    }
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 2);
+    let mut col = 0usize;
+    for span in &line.spans {
+        let span_chars = span.content.chars().count();
+        let span_start = col;
+        let span_end = col + span_chars;
+        col = span_end;
+        if span_chars == 0 || span_end <= col_start || span_start >= col_end {
+            out.push(span.clone());
+            continue;
+        }
+        let chars: Vec<char> = span.content.chars().collect();
+        let pre_len = col_start.saturating_sub(span_start);
+        let mid_end = (col_end - span_start).min(span_chars);
+        if pre_len > 0 {
+            let s: String = chars[..pre_len].iter().collect();
+            out.push(Span::styled(s, span.style));
+        }
+        let mid: String = chars[pre_len..mid_end].iter().collect();
+        out.push(Span::styled(
+            mid,
+            span.style.add_modifier(Modifier::REVERSED),
+        ));
+        if mid_end < span_chars {
+            let s: String = chars[mid_end..].iter().collect();
+            out.push(Span::styled(s, span.style));
+        }
+    }
+    Line::from(out)
 }
 
 fn load_image(picker: &Picker, path: &PathBuf) -> Option<StatefulProtocol> {

@@ -2,11 +2,17 @@ use crate::config::Config;
 use crate::error::AppError;
 use crate::fs::{self, FileNode};
 use crate::keys::{self, Action, KeyCombo};
-use crate::markdown;
+use crate::markdown::{self, LinkRef, ParseResult};
+use crate::wikilink;
+use ratatui::layout::Rect;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::rc::Rc;
+
+const HISTORY_CAP: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchDirection {
@@ -17,6 +23,11 @@ pub enum SearchDirection {
 #[derive(Debug, Clone)]
 pub struct SearchInput {
     pub direction: SearchDirection,
+    pub buffer: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LineJumpPrompt {
     pub buffer: String,
 }
 
@@ -44,14 +55,59 @@ pub struct App {
     pub search_input: Option<SearchInput>,
     pub last_search: Option<String>,
     pub last_search_direction: SearchDirection,
+    pub line_prompt: Option<LineJumpPrompt>,
+    pub pending_g: bool,
+    pub selected_link: Option<usize>,
     pub status_message: Option<String>,
     pub picker: Option<Picker>,
     pub image_cache: HashMap<PathBuf, StatefulProtocol>,
+    /// Body area of the preview pane from the last frame, used to map mouse
+    /// click coordinates to (line, col). `None` until a viewing frame has been
+    /// rendered.
+    pub last_preview_body: Option<Rect>,
+    /// Width in cells of the line-number gutter from the last frame (0 when
+    /// line numbers are disabled).
+    pub last_gutter_width: u16,
+    /// Browser-style navigation history. `history_pos` is the index of the
+    /// file currently visible; capped at HISTORY_CAP entries (oldest dropped).
+    pub history: VecDeque<HistoryEntry>,
+    pub history_pos: Option<usize>,
+    /// Set together by `nav_step` callers (paired with `pending_scroll`). The
+    /// next `set_content` applies the scroll and skips appending to history.
+    pub suppress_history_push: bool,
+    pub pending_scroll: Option<u16>,
+    /// Cached parse of the current `content`. Cleared by `set_content` and
+    /// `invalidate_caches`. Held in `Rc` so callers can keep a snapshot
+    /// alive across `&mut self` operations.
+    cached_parse: Option<Rc<ParseResult>>,
+    /// Lower-cased file-stem → absolute path index for wiki-link resolution.
+    /// Cleared whenever the file tree mutates.
+    tree_index: Option<HashMap<String, PathBuf>>,
+    /// Theme colors resolved from `config.theme` once at startup. Immutable
+    /// after that, so we don't re-`color_from_str` on every parse.
+    render_cfg: markdown::RenderConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct HistoryEntry {
+    pub path: PathBuf,
+    pub scroll: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavDir {
+    Back,
+    Forward,
 }
 
 impl App {
     pub fn new(config: Config) -> Self {
         let keymap = keys::build_keymap(&config);
+        let render_cfg = markdown::RenderConfig {
+            heading_color: markdown::color_from_str(&config.theme.heading_color),
+            code_color: markdown::color_from_str(&config.theme.code_color),
+            image_height: config.theme.image_height,
+        };
         Self {
             running: true,
             state: AppState::default(),
@@ -68,6 +124,18 @@ impl App {
             search_input: None,
             last_search: None,
             last_search_direction: SearchDirection::Forward,
+            line_prompt: None,
+            pending_g: false,
+            selected_link: None,
+            last_preview_body: None,
+            last_gutter_width: 0,
+            history: VecDeque::new(),
+            history_pos: None,
+            suppress_history_push: false,
+            pending_scroll: None,
+            cached_parse: None,
+            tree_index: None,
+            render_cfg,
             status_message: None,
             picker: None,
             image_cache: HashMap::new(),
@@ -178,14 +246,8 @@ impl App {
         }
     }
 
-    fn total_lines(&self) -> usize {
-        let content = self.content.as_deref().unwrap_or("");
-        let cfg = markdown::RenderConfig {
-            heading_color: markdown::color_from_str(&self.config.theme.heading_color),
-            code_color: markdown::color_from_str(&self.config.theme.code_color),
-            image_height: self.config.theme.image_height,
-        };
-        markdown::parse_with_config(content, &cfg).len()
+    fn total_lines(&mut self) -> usize {
+        self.parse_current().lines.len()
     }
 
     /// Append a digit to the count buffer (used for vi-style `Nj`, `Nk`).
@@ -214,6 +276,45 @@ impl App {
         n
     }
 
+    pub fn start_line_prompt(&mut self) {
+        self.line_prompt = Some(LineJumpPrompt::default());
+        self.status_message = None;
+    }
+
+    pub fn cancel_line_prompt(&mut self) {
+        self.line_prompt = None;
+    }
+
+    pub fn line_prompt_push(&mut self, c: char) {
+        if !c.is_ascii_digit() {
+            return;
+        }
+        if let Some(p) = self.line_prompt.as_mut()
+            && p.buffer.len() < 9
+        {
+            p.buffer.push(c);
+        }
+    }
+
+    pub fn line_prompt_pop(&mut self) {
+        if let Some(p) = self.line_prompt.as_mut() {
+            p.buffer.pop();
+        }
+    }
+
+    /// Confirm the `:N` prompt: jump to that line in the current view.
+    pub fn confirm_line_prompt(&mut self) {
+        let Some(p) = self.line_prompt.take() else {
+            return;
+        };
+        if p.buffer.is_empty() {
+            return;
+        }
+        let n: usize = p.buffer.parse().unwrap_or(1);
+        self.goto_line(n);
+        self.status_message = None;
+    }
+
     pub fn start_search(&mut self, direction: SearchDirection) {
         self.search_input = Some(SearchInput {
             direction,
@@ -238,18 +339,28 @@ impl App {
         }
     }
 
-    /// Confirm the active search prompt: store the query, jump to first match.
+    /// Confirm the active search prompt: store the query, jump to next match.
+    /// Empty buffer reuses the previous query (vim-style `/<Enter>`).
+    /// Search advances past the current line — without a visible character
+    /// cursor in viewing mode, "stay on current match" feels broken; the
+    /// match is still found via wrap-around if it's the only one.
     pub fn confirm_search(&mut self) {
         let Some(input) = self.search_input.take() else {
             return;
         };
-        if input.buffer.is_empty() {
-            return;
-        }
-        self.last_search = Some(input.buffer.clone());
-        self.last_search_direction = input.direction;
-        if !self.jump_to_match(&input.buffer, input.direction, false) {
-            self.status_message = Some(format!("Pattern not found: {}", input.buffer));
+        let direction = input.direction;
+        let query = if input.buffer.is_empty() {
+            match self.last_search.clone() {
+                Some(q) => q,
+                None => return,
+            }
+        } else {
+            input.buffer
+        };
+        self.last_search = Some(query.clone());
+        self.last_search_direction = direction;
+        if !self.jump_to_match(&query, direction, true) {
+            self.status_message = Some(format!("Pattern not found: {}", query));
         } else {
             self.status_message = None;
         }
@@ -277,25 +388,19 @@ impl App {
     }
 
     /// Search target lines for the current state.
-    fn search_target_lines(&self) -> Vec<String> {
+    fn search_target_lines(&mut self) -> Vec<String> {
         match self.state {
-            AppState::Viewing => {
-                let content = self.content.as_deref().unwrap_or("");
-                let cfg = markdown::RenderConfig {
-                    heading_color: markdown::color_from_str(&self.config.theme.heading_color),
-                    code_color: markdown::color_from_str(&self.config.theme.code_color),
-                    image_height: self.config.theme.image_height,
-                };
-                markdown::parse_with_config(content, &cfg)
-                    .iter()
-                    .map(|line| {
-                        line.spans
-                            .iter()
-                            .map(|s| s.content.as_ref())
-                            .collect::<String>()
-                    })
-                    .collect()
-            }
+            AppState::Viewing => self
+                .parse_current()
+                .lines
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect(),
             AppState::Browsing => {
                 let Some(tree) = self.tree.as_ref() else {
                     return Vec::new();
@@ -378,13 +483,182 @@ impl App {
         self.load_error = None;
     }
 
-    pub fn set_content(&mut self, content: String, name: String, base_dir: Option<PathBuf>) {
+    pub fn set_content(
+        &mut self,
+        path: Option<PathBuf>,
+        content: String,
+        base_dir: Option<PathBuf>,
+    ) {
+        if !self.suppress_history_push {
+            self.save_scroll_to_history();
+        }
+        let derived_name = path
+            .as_deref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(String::from)
+            .unwrap_or_else(|| "untitled".to_string());
         self.content = Some(content);
-        self.file_name = Some(name);
+        self.file_name = Some(derived_name);
         self.base_dir = base_dir;
-        self.scroll = 0;
+        self.scroll = self.pending_scroll.take().unwrap_or(0);
         self.state = AppState::Viewing;
         self.image_cache.clear();
+        self.selected_link = None;
+        self.invalidate_parse_cache();
+        if let Some(p) = path {
+            if self.suppress_history_push {
+                self.suppress_history_push = false;
+            } else {
+                self.push_history(p);
+            }
+        }
+    }
+
+    /// Append `path` to history at the current position, dropping any
+    /// "forward" entries. No-op for consecutive duplicates. Caps at
+    /// `HISTORY_CAP` by dropping the oldest.
+    fn push_history(&mut self, path: PathBuf) {
+        if let Some(pos) = self.history_pos {
+            self.history.truncate(pos + 1);
+            if self.history.back().map(|e| &e.path) == Some(&path) {
+                return;
+            }
+        }
+        self.history.push_back(HistoryEntry { path, scroll: 0 });
+        while self.history.len() > HISTORY_CAP {
+            self.history.pop_front();
+        }
+        self.history_pos = Some(self.history.len() - 1);
+    }
+
+    pub fn save_scroll_to_history(&mut self) {
+        if let Some(pos) = self.history_pos
+            && let Some(entry) = self.history.get_mut(pos)
+        {
+            entry.scroll = self.scroll;
+        }
+    }
+
+    /// Move the history cursor in `dir`. Returns the target path and the
+    /// scroll to restore, or `None` at a boundary.
+    pub fn nav_step(&mut self, dir: NavDir) -> Option<(PathBuf, u16)> {
+        let pos = self.history_pos?;
+        let new_pos = match dir {
+            NavDir::Back if pos == 0 => return None,
+            NavDir::Back => pos - 1,
+            NavDir::Forward if pos + 1 >= self.history.len() => return None,
+            NavDir::Forward => pos + 1,
+        };
+        self.save_scroll_to_history();
+        self.history_pos = Some(new_pos);
+        let entry = self.history.get(new_pos)?;
+        Some((entry.path.clone(), entry.scroll))
+    }
+
+    /// Parse the current content (with wiki-link preprocessing) and cache the
+    /// result. Returned `Rc` lets callers hold a snapshot across `&mut self`
+    /// operations without copying the line vector.
+    pub fn parse_current(&mut self) -> Rc<ParseResult> {
+        if let Some(cached) = &self.cached_parse {
+            return Rc::clone(cached);
+        }
+        let content = self.content.clone().unwrap_or_default();
+        let base_dir = self.base_dir.clone();
+        let index = self.ensure_tree_index();
+        let preprocessed = wikilink::rewrite(&content, index, base_dir.as_deref());
+        let result = Rc::new(markdown::parse_full_with(
+            &preprocessed,
+            &self.render_cfg,
+            base_dir.as_deref(),
+        ));
+        self.cached_parse = Some(Rc::clone(&result));
+        result
+    }
+
+    fn ensure_tree_index(&mut self) -> Option<&HashMap<String, PathBuf>> {
+        if self.tree_index.is_none() {
+            let mut idx: HashMap<String, PathBuf> = HashMap::new();
+            if let Some(t) = &self.tree {
+                build_tree_index(t, &mut idx);
+            }
+            self.tree_index = Some(idx);
+        }
+        self.tree_index.as_ref()
+    }
+
+    fn invalidate_parse_cache(&mut self) {
+        self.cached_parse = None;
+    }
+
+    fn invalidate_tree_caches(&mut self) {
+        self.tree_index = None;
+        self.cached_parse = None;
+    }
+
+    /// Cycle through links in the current view. `step` is +1 (next) or -1 (prev).
+    /// Wraps around. Adjusts scroll so the selected link is visible within the
+    /// `viewport` row count.
+    pub fn cycle_link(&mut self, step: i32, viewport: usize) {
+        let result = self.parse_current();
+        let n = result.links.len();
+        if n == 0 {
+            self.selected_link = None;
+            self.status_message = Some("No links".to_string());
+            return;
+        }
+        let next = match self.selected_link {
+            Some(i) => {
+                let len = n as i32;
+                ((i as i32 + step).rem_euclid(len)) as usize
+            }
+            None => {
+                if step >= 0 {
+                    0
+                } else {
+                    n - 1
+                }
+            }
+        };
+        self.selected_link = Some(next);
+        self.status_message = None;
+        let line = result.links[next].line as u16;
+        let viewport = viewport.max(1) as u16;
+        if line < self.scroll {
+            self.scroll = line;
+        } else if line >= self.scroll.saturating_add(viewport) {
+            self.scroll = line.saturating_sub(viewport.saturating_sub(1));
+        }
+    }
+
+    pub fn current_link(&mut self) -> Option<LinkRef> {
+        let idx = self.selected_link?;
+        let result = self.parse_current();
+        result.links.get(idx).cloned()
+    }
+
+    /// Translate a terminal mouse position into a link index, if the click
+    /// landed on a link's display text.
+    pub fn link_at_terminal(&mut self, term_col: u16, term_row: u16) -> Option<usize> {
+        let body = self.last_preview_body?;
+        if term_col < body.x
+            || term_col >= body.x.saturating_add(body.width)
+            || term_row < body.y
+            || term_row >= body.y.saturating_add(body.height)
+        {
+            return None;
+        }
+        let local_col = term_col - body.x;
+        if local_col < self.last_gutter_width {
+            return None;
+        }
+        let char_col = (local_col - self.last_gutter_width) as usize;
+        let line_index = (term_row - body.y) as usize + self.scroll as usize;
+        let result = self.parse_current();
+        result
+            .links
+            .iter()
+            .position(|l| l.line == line_index && char_col >= l.col_start && char_col < l.col_end)
     }
 
     pub fn set_error(&mut self, err: String) {
@@ -409,6 +683,8 @@ impl App {
         let mut counter = 0usize;
         Self::toggle_at(tree, target, &mut counter)?;
         self.clamp_cursor();
+        // Lazy expansion may have surfaced new wiki-link targets.
+        self.invalidate_tree_caches();
         Ok(())
     }
 
@@ -519,9 +795,39 @@ impl App {
     }
 
     fn flat_len(node: &FileNode) -> usize {
-        let mut flat: Vec<&FileNode> = Vec::new();
-        Self::flatten_tree(node, &mut flat);
-        flat.len()
+        let mut n = 1;
+        if let FileNode::Dir {
+            children,
+            expanded: true,
+            ..
+        } = node
+        {
+            for child in children {
+                n += Self::flat_len(child);
+            }
+        }
+        n
+    }
+}
+
+fn build_tree_index(node: &FileNode, out: &mut HashMap<String, PathBuf>) {
+    match node {
+        FileNode::File(p) => {
+            if !matches!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("md") | Some("markdown")
+            ) {
+                return;
+            }
+            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                out.entry(stem.to_lowercase()).or_insert_with(|| p.clone());
+            }
+        }
+        FileNode::Dir { children, .. } => {
+            for child in children {
+                build_tree_index(child, out);
+            }
+        }
     }
 }
 
@@ -665,6 +971,209 @@ mod tests {
         }
         app.confirm_search();
         assert!(app.status_message.is_some());
+    }
+
+    #[test]
+    fn test_line_prompt_collects_digits_and_jumps() {
+        let dir = tempfile::tempdir().unwrap();
+        stdfs::write(dir.path().join("a.md"), "a").unwrap();
+        stdfs::write(dir.path().join("b.md"), "b").unwrap();
+        stdfs::write(dir.path().join("c.md"), "c").unwrap();
+        let tree = fs::walk_dir(dir.path()).unwrap();
+        let mut app = make_app_with_tree(tree);
+        app.start_line_prompt();
+        assert!(app.line_prompt.is_some());
+        app.line_prompt_push('3'); // accepted
+        app.line_prompt_push('a'); // ignored — non-digit
+        app.confirm_line_prompt();
+        assert!(app.line_prompt.is_none());
+        // Flat list: root, a.md, b.md, c.md → line 3 = b.md (index 2).
+        assert_eq!(app.tree_cursor, 2);
+    }
+
+    #[test]
+    fn test_line_prompt_cancels_on_esc_path() {
+        let mut app = App::new(Config::default());
+        app.start_line_prompt();
+        app.line_prompt_push('5');
+        app.cancel_line_prompt();
+        assert!(app.line_prompt.is_none());
+    }
+
+    #[test]
+    fn test_cycle_link_with_no_links_sets_status() {
+        let mut app = App::new(Config::default());
+        app.set_content(None, "no links here, just text".to_string(), None);
+        app.cycle_link(1, 20);
+        assert_eq!(app.selected_link, None);
+        assert_eq!(app.status_message.as_deref(), Some("No links"));
+    }
+
+    #[test]
+    fn test_cycle_link_wraps_and_selects_first_link() {
+        let mut app = App::new(Config::default());
+        app.set_content(
+            None,
+            "[a](a.md) and [b](b.md) and [c](c.md)".to_string(),
+            Some(PathBuf::from("/tmp")),
+        );
+        app.cycle_link(1, 20);
+        assert_eq!(app.selected_link, Some(0));
+        app.cycle_link(1, 20);
+        assert_eq!(app.selected_link, Some(1));
+        app.cycle_link(-1, 20);
+        assert_eq!(app.selected_link, Some(0));
+        app.cycle_link(-1, 20);
+        // Wraps to the last link.
+        assert_eq!(app.selected_link, Some(2));
+    }
+
+    #[test]
+    fn test_link_at_terminal_hits_link_in_body_area() {
+        let mut app = App::new(Config::default());
+        app.set_content(
+            None,
+            "see [target](file.md) here".to_string(),
+            Some(PathBuf::from("/tmp")),
+        );
+        // Pretend a frame was rendered: body at (10, 5) with no gutter.
+        app.last_preview_body = Some(Rect::new(10, 5, 80, 24));
+        app.last_gutter_width = 0;
+        app.scroll = 0;
+        // "see " = chars 0..4, "target" = 4..10. Click at col 16 (= 10 + 6).
+        let idx = app.link_at_terminal(16, 5);
+        assert_eq!(idx, Some(0));
+        // Outside body — None.
+        assert_eq!(app.link_at_terminal(0, 0), None);
+        // Inside body but on whitespace — None.
+        assert_eq!(app.link_at_terminal(11, 5), None);
+    }
+
+    #[test]
+    fn test_link_at_terminal_respects_gutter_and_scroll() {
+        let mut app = App::new(Config::default());
+        app.set_content(
+            None,
+            "line1\n\nlink [target](file.md) end".to_string(),
+            Some(PathBuf::from("/tmp")),
+        );
+        app.last_preview_body = Some(Rect::new(0, 0, 80, 24));
+        app.last_gutter_width = 4; // 3-digit gutter + space
+        app.scroll = 2;
+        // Link is on parsed line 2 ("link [target] end"). With scroll=2,
+        // line 2 maps to row 0. Display: "link " 5 chars, "target" at 5..11.
+        // Click at col 4 + 5 + 2 = 11 (gutter + "link " + 2 chars in).
+        let idx = app.link_at_terminal(11, 0);
+        assert_eq!(idx, Some(0));
+        // Click in the gutter — None.
+        assert_eq!(app.link_at_terminal(2, 0), None);
+    }
+
+    #[test]
+    fn test_history_records_and_navigates_back_forward() {
+        let mut app = App::new(Config::default());
+        // Open A, B, C in sequence. Each call to set_content with a real path
+        // should push to history.
+        app.set_content(
+            Some(PathBuf::from("/n/A.md")),
+            "content A".to_string(),
+            Some(PathBuf::from("/n")),
+        );
+        app.scroll = 5;
+        app.set_content(
+            Some(PathBuf::from("/n/B.md")),
+            "content B".to_string(),
+            Some(PathBuf::from("/n")),
+        );
+        app.scroll = 10;
+        app.set_content(
+            Some(PathBuf::from("/n/C.md")),
+            "content C".to_string(),
+            Some(PathBuf::from("/n")),
+        );
+        assert_eq!(app.history.len(), 3);
+        assert_eq!(app.history_pos, Some(2));
+
+        let target = app.nav_step(NavDir::Back).expect("expected back target");
+        assert_eq!(target.0, PathBuf::from("/n/B.md"));
+        assert_eq!(target.1, 10);
+        assert_eq!(app.history_pos, Some(1));
+        assert_eq!(app.history[2].scroll, app.scroll);
+
+        let target = app.nav_step(NavDir::Back).expect("expected back target");
+        assert_eq!(target.0, PathBuf::from("/n/A.md"));
+        assert_eq!(target.1, 5);
+        assert_eq!(app.history_pos, Some(0));
+
+        assert!(app.nav_step(NavDir::Back).is_none());
+
+        let target = app
+            .nav_step(NavDir::Forward)
+            .expect("expected forward target");
+        assert_eq!(target.0, PathBuf::from("/n/B.md"));
+        assert_eq!(app.history_pos, Some(1));
+    }
+
+    #[test]
+    fn test_history_truncates_forward_on_new_open() {
+        let mut app = App::new(Config::default());
+        for name in ["A", "B", "C"] {
+            app.set_content(
+                Some(PathBuf::from(format!("/n/{}.md", name))),
+                name.to_string(),
+                Some(PathBuf::from("/n")),
+            );
+        }
+        app.nav_step(NavDir::Back);
+        app.nav_step(NavDir::Back);
+        assert_eq!(app.history_pos, Some(0));
+        app.set_content(
+            Some(PathBuf::from("/n/D.md")),
+            "D".to_string(),
+            Some(PathBuf::from("/n")),
+        );
+        assert_eq!(app.history.len(), 2);
+        assert_eq!(app.history[1].path, PathBuf::from("/n/D.md"));
+        assert_eq!(app.history_pos, Some(1));
+    }
+
+    #[test]
+    fn test_history_skip_when_suppressed() {
+        let mut app = App::new(Config::default());
+        app.set_content(
+            Some(PathBuf::from("/n/A.md")),
+            "A".to_string(),
+            Some(PathBuf::from("/n")),
+        );
+        app.suppress_history_push = true;
+        app.pending_scroll = Some(7);
+        app.set_content(
+            Some(PathBuf::from("/n/A.md")),
+            "A again".to_string(),
+            Some(PathBuf::from("/n")),
+        );
+        assert_eq!(app.history.len(), 1);
+        assert_eq!(app.scroll, 7);
+        assert!(app.pending_scroll.is_none());
+        assert!(!app.suppress_history_push);
+    }
+
+    #[test]
+    fn test_history_capped_at_history_cap() {
+        let mut app = App::new(Config::default());
+        for i in 0..(HISTORY_CAP + 20) {
+            app.set_content(
+                Some(PathBuf::from(format!("/n/F{}.md", i))),
+                format!("file {}", i),
+                Some(PathBuf::from("/n")),
+            );
+        }
+        assert_eq!(app.history.len(), HISTORY_CAP);
+        // Oldest entries dropped — the front should be F20, not F0.
+        assert_eq!(
+            app.history.front().unwrap().path,
+            PathBuf::from("/n/F20.md")
+        );
     }
 
     #[test]

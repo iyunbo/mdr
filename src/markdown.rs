@@ -5,6 +5,7 @@ use ratatui::{
 };
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy)]
 pub struct RenderConfig {
     pub heading_color: Color,
     pub code_color: Color,
@@ -31,10 +32,28 @@ pub struct ImageRef {
     pub height: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkTarget {
+    Local(PathBuf),
+    Url(String),
+}
+
+/// A clickable / activatable link inside the rendered output.
+/// `line` is the row index in the `lines` vector; `col_start`..`col_end` are
+/// character offsets within that line covering the link's display text.
+#[derive(Debug, Clone)]
+pub struct LinkRef {
+    pub line: usize,
+    pub col_start: usize,
+    pub col_end: usize,
+    pub target: LinkTarget,
+}
+
 #[derive(Debug, Default)]
 pub struct ParseResult {
     pub lines: Vec<Line<'static>>,
     pub images: Vec<ImageRef>,
+    pub links: Vec<LinkRef>,
 }
 
 pub fn color_from_str(s: &str) -> Color {
@@ -72,6 +91,7 @@ struct TableBuf {
     current_cell: Vec<Span<'static>>,
 }
 
+#[cfg(test)]
 pub fn parse_with_config(content: &str, config: &RenderConfig) -> Vec<Line<'static>> {
     parse_full_with(content, config, None).lines
 }
@@ -87,16 +107,41 @@ pub fn parse_full_with(
 ) -> ParseResult {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut images: Vec<ImageRef> = Vec::new();
+    let mut links: Vec<LinkRef> = Vec::new();
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut current_style = Style::default();
     let mut current_heading: Option<HeadingLevel> = None;
     let mut table: Option<TableBuf> = None;
     let mut in_code_block = false;
     let mut current_image: Option<PendingImage> = None;
+    let mut current_link: Option<PendingLink> = None;
+    let mut list_stack: Vec<Option<u64>> = Vec::new();
 
     let parser = Parser::new_ext(content, Options::all());
     for event in parser {
         match event {
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                // `record: false` inside tables — col offsets there index the
+                // cell buffer, not the line.
+                current_link = Some(PendingLink {
+                    dest: dest_url.to_string(),
+                    line_at_start: lines.len(),
+                    col_start: current_line_chars(&spans),
+                    prev_style: current_style,
+                    record: table.is_none(),
+                });
+                current_style = current_style
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::UNDERLINED);
+            }
+            Event::End(TagEnd::Link) => {
+                if let Some(link) = current_link.take() {
+                    current_style = link.prev_style;
+                    if let Some(link_ref) = finalize_link(&link, &spans, &lines, base_dir) {
+                        links.push(link_ref);
+                    }
+                }
+            }
             Event::Start(Tag::Image { dest_url, .. }) => {
                 current_image = Some(PendingImage {
                     dest: dest_url.to_string(),
@@ -144,6 +189,43 @@ pub fn parse_full_with(
                 blank_before_heading(&mut lines, level);
                 current_heading = Some(level);
                 current_style = heading_style(level, config);
+            }
+            Event::Start(Tag::List(start)) => {
+                if !spans.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut spans)));
+                }
+                list_stack.push(start);
+            }
+            Event::End(TagEnd::List(_)) => {
+                if !spans.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut spans)));
+                }
+                list_stack.pop();
+                if list_stack.is_empty() {
+                    lines.push(Line::default());
+                }
+            }
+            Event::Start(Tag::Item) => {
+                if !spans.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut spans)));
+                }
+                let depth = list_stack.len().saturating_sub(1);
+                let indent: String = " ".repeat(depth * 2);
+                let bullet = match list_stack.last_mut() {
+                    Some(Some(n)) => {
+                        let s = format!("{}. ", *n);
+                        *n += 1;
+                        s
+                    }
+                    _ => "• ".to_string(),
+                };
+                if !indent.is_empty() {
+                    spans.push(Span::raw(indent));
+                }
+                spans.push(Span::styled(bullet, Style::default().fg(Color::DarkGray)));
+            }
+            Event::End(TagEnd::Item) if !spans.is_empty() => {
+                lines.push(Line::from(std::mem::take(&mut spans)));
             }
             Event::Start(Tag::Strong) => {
                 current_style = current_style.add_modifier(Modifier::BOLD);
@@ -265,12 +347,81 @@ pub fn parse_full_with(
         lines.push(Line::from(spans));
     }
 
-    ParseResult { lines, images }
+    ParseResult {
+        lines,
+        images,
+        links,
+    }
 }
 
 struct PendingImage {
     dest: String,
     alt: String,
+}
+
+struct PendingLink {
+    dest: String,
+    line_at_start: usize,
+    col_start: usize,
+    prev_style: Style,
+    record: bool,
+}
+
+fn current_line_chars(spans: &[Span<'static>]) -> usize {
+    spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+fn finalize_link(
+    link: &PendingLink,
+    spans: &[Span<'static>],
+    lines: &[Line<'static>],
+    base_dir: Option<&Path>,
+) -> Option<LinkRef> {
+    if !link.record {
+        return None;
+    }
+    let line = lines.len();
+    let col_end = current_line_chars(spans);
+    let (col_start, col_end) = if line == link.line_at_start {
+        if col_end <= link.col_start {
+            return None;
+        }
+        (link.col_start, col_end)
+    } else {
+        // Link wrapped across a soft break — record only the tail line.
+        if col_end == 0 {
+            return None;
+        }
+        (0, col_end)
+    };
+    let target = resolve_link_target(&link.dest, base_dir)?;
+    Some(LinkRef {
+        line,
+        col_start,
+        col_end,
+        target,
+    })
+}
+
+fn resolve_link_target(dest: &str, base_dir: Option<&Path>) -> Option<LinkTarget> {
+    if dest.is_empty() {
+        return None;
+    }
+    if dest.starts_with("http://") || dest.starts_with("https://") {
+        return Some(LinkTarget::Url(dest.to_string()));
+    }
+    // Strip in-document anchors — `file.md#section` resolves to `file.md`.
+    let path_part = dest.split('#').next().unwrap_or(dest);
+    if path_part.is_empty() {
+        return None;
+    }
+    let p = PathBuf::from(path_part);
+    let resolved = if p.is_absolute() {
+        p
+    } else {
+        base_dir?.join(p)
+    };
+    Some(LinkTarget::Local(resolved))
 }
 
 fn resolve_image_path(dest: &str, base_dir: Option<&Path>) -> Option<PathBuf> {
@@ -709,6 +860,130 @@ mod tests {
         // First row has placeholder, next height-1 rows are blank.
         let total_rows_after_image = result.lines.len();
         assert!(total_rows_after_image >= 8, "expected >=8 lines for image");
+    }
+
+    #[test]
+    fn test_tight_list_items_each_on_their_own_line() {
+        let md = "- alpha\n- beta\n- gamma\n";
+        let lines = parse(md);
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        // Each item should appear as its own rendered line, in order.
+        let pos_alpha = texts.iter().position(|t| t.contains("alpha")).unwrap();
+        let pos_beta = texts.iter().position(|t| t.contains("beta")).unwrap();
+        let pos_gamma = texts.iter().position(|t| t.contains("gamma")).unwrap();
+        assert!(pos_alpha < pos_beta && pos_beta < pos_gamma);
+        // They must NOT be glued on the same line.
+        assert!(
+            !texts
+                .iter()
+                .any(|t| t.contains("alpha") && t.contains("beta"))
+        );
+    }
+
+    #[test]
+    fn test_ordered_list_uses_number_prefix() {
+        let md = "1. one\n2. two\n";
+        let lines = parse(md);
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.starts_with("1. ") && t.contains("one")),
+            "got: {:?}",
+            texts
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.starts_with("2. ") && t.contains("two")),
+            "got: {:?}",
+            texts
+        );
+    }
+
+    #[test]
+    fn test_link_local_path_recorded_with_correct_offsets() {
+        let base = Path::new("/some/dir");
+        let result = parse_full_with(
+            "see [docs](readme.md) here",
+            &RenderConfig::default(),
+            Some(base),
+        );
+        assert_eq!(result.links.len(), 1, "expected one link");
+        let link = &result.links[0];
+        assert_eq!(link.line, 0);
+        assert_eq!(link.col_start, "see ".chars().count());
+        assert_eq!(link.col_end, "see docs".chars().count());
+        match &link.target {
+            LinkTarget::Local(p) => assert_eq!(p, &PathBuf::from("/some/dir/readme.md")),
+            _ => panic!("expected local target"),
+        }
+    }
+
+    #[test]
+    fn test_link_url_target() {
+        let result = parse_full("click [here](https://example.com/x)");
+        assert_eq!(result.links.len(), 1);
+        match &result.links[0].target {
+            LinkTarget::Url(u) => assert_eq!(u, "https://example.com/x"),
+            _ => panic!("expected url target"),
+        }
+    }
+
+    #[test]
+    fn test_link_with_anchor_strips_fragment() {
+        let base = Path::new("/d");
+        let result = parse_full_with("[s](file.md#section)", &RenderConfig::default(), Some(base));
+        match &result.links[0].target {
+            LinkTarget::Local(p) => assert_eq!(p, &PathBuf::from("/d/file.md")),
+            _ => panic!("expected local target"),
+        }
+    }
+
+    #[test]
+    fn test_link_text_is_blue_and_underlined() {
+        let result = parse_full("[styled](x.md)");
+        let span = result
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.as_ref() == "styled")
+            .expect("expected styled link span");
+        assert_eq!(span.style.fg, Some(Color::Blue));
+        assert!(span.style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn test_link_inside_table_not_recorded_but_styled() {
+        let md = "| a | b |\n|---|---|\n| [x](y.md) | z |\n";
+        let result = parse_full(md);
+        assert!(
+            result.links.is_empty(),
+            "links inside tables shouldn't be tracked"
+        );
+        let span = result
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.as_ref() == "x")
+            .expect("expected link text in table");
+        assert_eq!(span.style.fg, Some(Color::Blue));
     }
 
     #[test]

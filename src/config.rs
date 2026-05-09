@@ -20,7 +20,27 @@ use std::collections::HashMap;
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub theme: ThemeConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
     pub keys: HashMap<String, KeyBinding>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct UiConfig {
+    #[serde(default = "default_mouse")]
+    pub mouse: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            mouse: default_mouse(),
+        }
+    }
+}
+
+fn default_mouse() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -74,6 +94,7 @@ impl Default for Config {
                 show_line_numbers: default_show_line_numbers(),
                 image_height: default_image_height(),
             },
+            ui: UiConfig::default(),
             keys: HashMap::from([
                 ("quit".to_string(), KeyBinding::Single("q".to_string())),
                 (
@@ -84,7 +105,6 @@ impl Default for Config {
                     "up".to_string(),
                     KeyBinding::Multiple(vec!["k".to_string(), "Up".to_string()]),
                 ),
-                ("top".to_string(), KeyBinding::Single("g".to_string())),
                 (
                     "activate".to_string(),
                     KeyBinding::Multiple(vec![
@@ -95,11 +115,7 @@ impl Default for Config {
                 ),
                 (
                     "back".to_string(),
-                    KeyBinding::Multiple(vec![
-                        "Esc".to_string(),
-                        "h".to_string(),
-                        "Left".to_string(),
-                    ]),
+                    KeyBinding::Multiple(vec!["h".to_string(), "Left".to_string()]),
                 ),
                 (
                     "search_forward".to_string(),
@@ -126,6 +142,34 @@ impl Default for Config {
                     "halfpage_up".to_string(),
                     KeyBinding::Single("Ctrl+u".to_string()),
                 ),
+                (
+                    "page_down".to_string(),
+                    KeyBinding::Single("Ctrl+f".to_string()),
+                ),
+                (
+                    "page_up".to_string(),
+                    KeyBinding::Single("Ctrl+b".to_string()),
+                ),
+                (
+                    "line_jump_prompt".to_string(),
+                    KeyBinding::Single(":".to_string()),
+                ),
+                (
+                    "next_link".to_string(),
+                    KeyBinding::Single("Tab".to_string()),
+                ),
+                (
+                    "prev_link".to_string(),
+                    KeyBinding::Single("Shift+Tab".to_string()),
+                ),
+                (
+                    "nav_back".to_string(),
+                    KeyBinding::Multiple(vec!["Ctrl+o".to_string(), "[".to_string()]),
+                ),
+                (
+                    "nav_forward".to_string(),
+                    KeyBinding::Multiple(vec!["Ctrl+]".to_string(), "]".to_string()]),
+                ),
             ]),
         }
     }
@@ -145,10 +189,11 @@ pub fn load() -> Config {
     merge(cfg, user)
 }
 
-/// Apply user config over defaults: theme is replaced wholesale,
+/// Apply user config over defaults: theme and ui are replaced wholesale,
 /// key bindings are merged so unspecified actions keep their default keys.
 pub fn merge(mut base: Config, user: Config) -> Config {
     base.theme = user.theme;
+    base.ui = user.ui;
     for (action, binding) in user.keys {
         base.keys.insert(action, binding);
     }

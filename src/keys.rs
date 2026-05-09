@@ -11,12 +11,19 @@ pub enum Action {
     Bottom,
     HalfPageDown,
     HalfPageUp,
+    PageDown,
+    PageUp,
     Activate,
     Back,
     SearchForward,
     SearchBackward,
     RepeatNext,
     RepeatPrev,
+    LineJumpPrompt,
+    NextLink,
+    PrevLink,
+    NavBack,
+    NavForward,
 }
 
 pub type KeyCombo = (KeyCode, KeyModifiers);
@@ -90,12 +97,19 @@ pub fn parse_action(s: &str) -> Option<Action> {
         "bottom" | "end" => Some(Action::Bottom),
         "halfpage_down" | "half_page_down" => Some(Action::HalfPageDown),
         "halfpage_up" | "half_page_up" => Some(Action::HalfPageUp),
+        "page_down" | "pagedown" => Some(Action::PageDown),
+        "page_up" | "pageup" => Some(Action::PageUp),
         "activate" | "open" => Some(Action::Activate),
         "back" => Some(Action::Back),
         "search_forward" => Some(Action::SearchForward),
         "search_backward" => Some(Action::SearchBackward),
         "repeat_next" => Some(Action::RepeatNext),
         "repeat_prev" => Some(Action::RepeatPrev),
+        "line_jump_prompt" | "goto_line" => Some(Action::LineJumpPrompt),
+        "next_link" => Some(Action::NextLink),
+        "prev_link" => Some(Action::PrevLink),
+        "nav_back" | "history_back" => Some(Action::NavBack),
+        "nav_forward" | "history_forward" => Some(Action::NavForward),
         _ => None,
     }
 }
@@ -199,5 +213,23 @@ mod tests {
             map.get(&(KeyCode::Char('u'), KeyModifiers::CONTROL)),
             Some(&Action::HalfPageUp)
         );
+        assert_eq!(
+            map.get(&(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+            Some(&Action::PageDown)
+        );
+        assert_eq!(
+            map.get(&(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+            Some(&Action::PageUp)
+        );
+        assert_eq!(
+            map.get(&(KeyCode::Char(':'), KeyModifiers::NONE)),
+            Some(&Action::LineJumpPrompt)
+        );
+        assert_eq!(
+            map.get(&(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(&Action::NextLink)
+        );
+        // `g` is no longer a single-key binding; the chord is handled in main.rs.
+        assert_eq!(map.get(&(KeyCode::Char('g'), KeyModifiers::NONE)), None);
     }
 }
