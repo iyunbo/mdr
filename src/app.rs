@@ -1157,4 +1157,382 @@ mod tests {
         assert_eq!(app.tree.as_ref().unwrap().visible_count(), 1);
         assert_eq!(app.tree_cursor, 0); // clamped from 0 (still in range)
     }
+
+    // --- Scroll / cursor primitives ---
+
+    #[test]
+    fn test_quit_flips_running() {
+        let mut app = App::new(Config::default());
+        assert!(app.running);
+        app.quit();
+        assert!(!app.running);
+    }
+
+    #[test]
+    fn test_scroll_primitives_saturate() {
+        let mut app = App::new(Config::default());
+        app.scroll_down();
+        app.scroll_down();
+        assert_eq!(app.scroll, 2);
+        app.scroll_up();
+        assert_eq!(app.scroll, 1);
+        app.scroll_top();
+        assert_eq!(app.scroll, 0);
+        app.scroll_up(); // saturates at 0
+        assert_eq!(app.scroll, 0);
+    }
+
+    #[test]
+    fn test_cursor_primitives_with_no_tree() {
+        let mut app = App::new(Config::default());
+        // No tree — cursor_down is a no-op (max=0).
+        app.cursor_down();
+        assert_eq!(app.tree_cursor, 0);
+        app.cursor_up();
+        assert_eq!(app.tree_cursor, 0);
+        app.cursor_top();
+        assert_eq!(app.tree_cursor, 0);
+    }
+
+    #[test]
+    fn test_cursor_primitives_walk_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        stdfs::write(dir.path().join("a.md"), "a").unwrap();
+        stdfs::write(dir.path().join("b.md"), "b").unwrap();
+        let tree = fs::walk_dir(dir.path()).unwrap();
+        let mut app = make_app_with_tree(tree);
+        // Flat: root, a.md, b.md (3 items)
+        app.cursor_down();
+        app.cursor_down();
+        assert_eq!(app.tree_cursor, 2);
+        app.cursor_down(); // saturates at last index
+        assert_eq!(app.tree_cursor, 2);
+        app.cursor_up();
+        assert_eq!(app.tree_cursor, 1);
+        app.cursor_top();
+        assert_eq!(app.tree_cursor, 0);
+    }
+
+    // --- Viewing-mode jump / page ---
+
+    #[test]
+    fn test_goto_line_in_viewing() {
+        let mut app = App::new(Config::default());
+        app.set_content(None, "a\nb\nc\nd\ne".to_string(), None);
+        // Now in Viewing state with 5 content lines.
+        app.goto_line(3);
+        assert_eq!(app.scroll, 2); // 1-indexed → row 2
+        app.goto_line(99); // clamps to last
+        let total = app.parse_current().lines.len();
+        assert_eq!(app.scroll as usize, total - 1);
+        app.goto_line(0); // 0 → line 1
+        assert_eq!(app.scroll, 0);
+    }
+
+    #[test]
+    fn test_goto_bottom_in_viewing() {
+        let mut app = App::new(Config::default());
+        app.set_content(None, "a\nb\nc\nd\ne\nf".to_string(), None);
+        let total = app.parse_current().lines.len();
+        app.goto_bottom(2);
+        assert_eq!(app.scroll as usize, total.saturating_sub(2));
+    }
+
+    #[test]
+    fn test_half_page_down_up_in_viewing_saturates() {
+        let mut app = App::new(Config::default());
+        // Many lines so half-page math has somewhere to go.
+        let body: String = (0..30).map(|i| format!("L{}\n", i)).collect();
+        app.set_content(None, body, None);
+        app.half_page_down(5);
+        assert_eq!(app.scroll, 5);
+        app.half_page_up(2);
+        assert_eq!(app.scroll, 3);
+        app.half_page_up(100); // saturate at top
+        assert_eq!(app.scroll, 0);
+        app.half_page_down(10_000); // clamp to last
+        let total = app.parse_current().lines.len() as u16;
+        assert_eq!(app.scroll, total.saturating_sub(1));
+    }
+
+    #[test]
+    fn test_jumps_in_loading_state_are_noops() {
+        let mut app = App::new(Config::default());
+        app.set_loading();
+        app.scroll = 7;
+        app.tree_cursor = 3;
+        app.goto_line(1);
+        app.goto_bottom(10);
+        app.half_page_down(5);
+        app.half_page_up(5);
+        // Nothing changed.
+        assert_eq!(app.scroll, 7);
+        assert_eq!(app.tree_cursor, 3);
+    }
+
+    // --- Search edge cases ---
+
+    #[test]
+    fn test_cancel_search_clears_input() {
+        let mut app = App::new(Config::default());
+        app.start_search(SearchDirection::Forward);
+        app.search_input_push('x');
+        app.cancel_search();
+        assert!(app.search_input.is_none());
+    }
+
+    #[test]
+    fn test_search_input_pop_removes_last_char() {
+        let mut app = App::new(Config::default());
+        app.start_search(SearchDirection::Forward);
+        for c in "abc".chars() {
+            app.search_input_push(c);
+        }
+        app.search_input_pop();
+        assert_eq!(app.search_input.as_ref().unwrap().buffer, "ab");
+    }
+
+    #[test]
+    fn test_repeat_search_without_previous_sets_status() {
+        let mut app = App::new(Config::default());
+        app.repeat_search(false);
+        assert_eq!(app.status_message.as_deref(), Some("No previous search"));
+    }
+
+    #[test]
+    fn test_repeat_search_reverse_flips_direction() {
+        let dir = tempfile::tempdir().unwrap();
+        stdfs::write(dir.path().join("alpha.md"), "a").unwrap();
+        stdfs::write(dir.path().join("beta.md"), "b").unwrap();
+        stdfs::write(dir.path().join("gamma.md"), "g").unwrap();
+        let tree = fs::walk_dir(dir.path()).unwrap();
+        let mut app = make_app_with_tree(tree);
+        // Flat: root, alpha.md, beta.md, gamma.md
+        app.tree_cursor = 0;
+        app.start_search(SearchDirection::Forward);
+        for c in "a".chars() {
+            app.search_input_push(c);
+        }
+        app.confirm_search();
+        // First match forward (skip current=true): alpha at index 1.
+        assert_eq!(app.tree_cursor, 1);
+        // Repeat reverse: backward from 1, with `a` matching gamma (wraps).
+        app.repeat_search(true);
+        // From 1, skip_current=true backward → wraps to gamma.md (3) or alpha (1) again.
+        // Either way, last_search_direction is unchanged.
+        assert_eq!(app.last_search_direction, SearchDirection::Forward);
+    }
+
+    #[test]
+    fn test_search_backward_wraps() {
+        let dir = tempfile::tempdir().unwrap();
+        stdfs::write(dir.path().join("alpha.md"), "a").unwrap();
+        stdfs::write(dir.path().join("beta.md"), "b").unwrap();
+        let tree = fs::walk_dir(dir.path()).unwrap();
+        let mut app = make_app_with_tree(tree);
+        // Flat: root, alpha.md, beta.md (3 items, cursor 0)
+        app.start_search(SearchDirection::Backward);
+        for c in "BETA".chars() {
+            app.search_input_push(c);
+        }
+        app.confirm_search();
+        // Backward from 0, skip_current=true → wraps to beta.md (index 2).
+        assert_eq!(app.tree_cursor, 2);
+    }
+
+    #[test]
+    fn test_search_in_viewing_finds_line() {
+        let mut app = App::new(Config::default());
+        app.set_content(None, "first\nsecond\nthird\n".to_string(), None);
+        app.scroll = 0;
+        app.start_search(SearchDirection::Forward);
+        for c in "third".chars() {
+            app.search_input_push(c);
+        }
+        app.confirm_search();
+        // Should jump to the line containing "third".
+        let lines = app.parse_current().lines.clone();
+        let third_idx = lines
+            .iter()
+            .position(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    .contains("third")
+            })
+            .unwrap();
+        assert_eq!(app.scroll as usize, third_idx);
+    }
+
+    // --- Line prompt edge ---
+
+    #[test]
+    fn test_line_prompt_pop_removes_last_digit() {
+        let mut app = App::new(Config::default());
+        app.start_line_prompt();
+        app.line_prompt_push('1');
+        app.line_prompt_push('2');
+        app.line_prompt_pop();
+        assert_eq!(app.line_prompt.as_ref().unwrap().buffer, "1");
+    }
+
+    // --- cycle_link edges ---
+
+    #[test]
+    fn test_cycle_link_backward_from_none_starts_at_last() {
+        let mut app = App::new(Config::default());
+        app.set_content(
+            None,
+            "[a](a.md) [b](b.md) [c](c.md)".to_string(),
+            Some(PathBuf::from("/tmp")),
+        );
+        // step = -1 with selected_link=None → starts at last index (n-1).
+        app.cycle_link(-1, 20);
+        assert_eq!(app.selected_link, Some(2));
+    }
+
+    #[test]
+    fn test_cycle_link_scrolls_into_view() {
+        let mut app = App::new(Config::default());
+        // Build content where the only link is far below the viewport.
+        let mut body = String::new();
+        for _ in 0..10 {
+            body.push_str("filler\n");
+        }
+        body.push_str("[far](far.md)\n");
+        app.set_content(None, body, Some(PathBuf::from("/tmp")));
+        app.scroll = 0;
+        app.cycle_link(1, 3); // viewport = 3 rows
+        // Link is around row 10. With viewport=3, scroll should jump down so
+        // the link is visible.
+        let result = app.parse_current();
+        let link_line = result.links[0].line as u16;
+        assert!(app.scroll <= link_line && link_line < app.scroll + 3);
+    }
+
+    // --- current_link / selected_node / set_error / set_loading ---
+
+    #[test]
+    fn test_current_link_returns_selected() {
+        let mut app = App::new(Config::default());
+        app.set_content(
+            None,
+            "[a](a.md) [b](b.md)".to_string(),
+            Some(PathBuf::from("/tmp")),
+        );
+        app.cycle_link(1, 20);
+        let link = app.current_link().expect("expected a link");
+        match link.target {
+            crate::markdown::LinkTarget::Local(p) => {
+                assert!(p.ends_with("a.md"))
+            }
+            other => panic!("expected Local, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_current_link_none_when_unselected() {
+        let mut app = App::new(Config::default());
+        app.set_content(None, "[x](x.md)".to_string(), Some(PathBuf::from("/tmp")));
+        // No cycle_link call → selected_link stays None.
+        assert!(app.current_link().is_none());
+    }
+
+    #[test]
+    fn test_selected_node_returns_node_at_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        stdfs::write(dir.path().join("a.md"), "a").unwrap();
+        stdfs::write(dir.path().join("b.md"), "b").unwrap();
+        let tree = fs::walk_dir(dir.path()).unwrap();
+        let mut app = make_app_with_tree(tree);
+        app.tree_cursor = 1; // on a.md
+        let node = app.selected_node().expect("expected a node");
+        assert!(node.is_markdown());
+        assert!(node.name().ends_with(".md"));
+    }
+
+    #[test]
+    fn test_selected_node_none_without_tree() {
+        let app = App::new(Config::default());
+        assert!(app.selected_node().is_none());
+    }
+
+    #[test]
+    fn test_set_error_switches_state_to_browsing() {
+        let mut app = App::new(Config::default());
+        app.set_content(None, "x".to_string(), None);
+        assert_eq!(app.state, AppState::Viewing);
+        app.set_error("boom".to_string());
+        assert_eq!(app.state, AppState::Browsing);
+        assert_eq!(app.load_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn test_set_loading_clears_content() {
+        let mut app = App::new(Config::default());
+        app.set_content(None, "x".to_string(), None);
+        app.load_error = Some("prev".to_string());
+        app.set_loading();
+        assert_eq!(app.state, AppState::Loading);
+        assert!(app.content.is_none());
+        assert!(app.load_error.is_none());
+    }
+
+    // --- clamp_cursor edge: empty tree ---
+
+    #[test]
+    fn test_collapse_clamps_cursor_into_range() {
+        let dir = tempfile::tempdir().unwrap();
+        stdfs::create_dir(dir.path().join("sub")).unwrap();
+        stdfs::write(dir.path().join("sub").join("x.md"), "x").unwrap();
+        stdfs::write(dir.path().join("y.md"), "y").unwrap();
+        let tree = fs::walk_dir(dir.path()).unwrap();
+        let mut app = make_app_with_tree(tree);
+        // Expand sub so we can collapse later. Flat after expand: root, sub, x.md, y.md
+        app.tree_cursor = 1;
+        app.toggle_selected().unwrap();
+        assert_eq!(app.tree.as_ref().unwrap().visible_count(), 4);
+        // Move cursor onto x.md (index 2).
+        app.tree_cursor = 2;
+        // Collapse sub — x.md disappears, cursor should clamp.
+        app.tree_cursor = 1;
+        app.collapse_selected();
+        assert!(app.tree_cursor < app.tree.as_ref().unwrap().visible_count());
+    }
+
+    // --- build_tree_index resolution path (covered indirectly via wiki-link) ---
+
+    #[test]
+    fn test_wikilink_resolves_via_tree_index_after_open() {
+        let dir = tempfile::tempdir().unwrap();
+        stdfs::create_dir(dir.path().join("nested")).unwrap();
+        stdfs::write(dir.path().join("nested").join("Target.md"), "# Target").unwrap();
+        stdfs::write(dir.path().join("home.md"), "see [[Target]]").unwrap();
+        let tree = fs::walk_dir(dir.path()).unwrap();
+        let mut app = make_app_with_tree(tree);
+        // Need to expand the nested dir so the index walks into it. The walk
+        // is lazy — `walk_dir` already walked one level, so root + nested are
+        // present but `nested.children` is empty until expanded.
+        // For this test, expand the nested dir.
+        app.tree_cursor = 1; // on `nested`
+        app.toggle_selected().unwrap();
+        // Now open home.md and parse — wiki-link `[[Target]]` should resolve
+        // to the nested path via build_tree_index.
+        let home = dir.path().join("home.md");
+        let content = stdfs::read_to_string(&home).unwrap();
+        app.set_content(Some(home.clone()), content, Some(dir.path().to_path_buf()));
+        let result = app.parse_current();
+        let link = result.links.first().expect("expected a link");
+        match &link.target {
+            crate::markdown::LinkTarget::Local(p) => {
+                assert!(
+                    p.ends_with("nested/Target.md"),
+                    "unexpected resolved path: {}",
+                    p.display()
+                );
+            }
+            other => panic!("expected Local, got {:?}", other),
+        }
+    }
 }
