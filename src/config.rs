@@ -1,19 +1,3 @@
-// LEARNING NOTE: Why does Config own its Strings instead of borrowing?
-//
-// A borrowed version would look like:
-//   struct Config<'a> {
-//       heading_color: &'a str,
-//   }
-//
-// This requires the original TOML string to outlive Config.
-// Since we load Config at startup and use it everywhere, that lifetime
-// is hard to manage. Owned String (heap-allocated) is simpler and
-// appropriate here — the config is small and loaded once.
-//
-// Use &str (borrowed) when: the caller owns the data, the function is
-// short-lived, and you want to avoid cloning.
-// Use String (owned) when: the data needs to outlive the call site.
-
 use serde::Deserialize;
 use std::collections::HashMap;
 

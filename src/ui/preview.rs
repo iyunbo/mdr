@@ -47,39 +47,31 @@ pub fn render(
     );
     frame.render_widget(title, title_area);
 
-    let image_rows: Vec<bool> =
-        compute_image_rows(params.lines.len(), params.images, params.scroll, body_area);
+    let image_rows: Vec<bool> = compute_image_rows(params.lines.len(), params.images);
 
     let selected = params
         .selected_link
         .and_then(|i| params.links.get(i))
         .filter(|link| link.line < params.lines.len());
 
-    let render_line = |i: usize, line: &Line<'static>| -> Line<'static> {
-        match selected {
-            Some(link) if link.line == i => highlight_range(line, link.col_start, link.col_end),
-            _ => line.clone(),
-        }
-    };
-
     let gutter_width: u16 = if params.show_line_numbers {
         let total = params.lines.len();
         let digits = total.to_string().len().max(2);
         let num_style = Style::default().fg(params.line_number_color);
-        let numbered: Vec<Line<'static>> = params
+        let numbered: Vec<Line<'_>> = params
             .lines
             .iter()
             .enumerate()
             .map(|(i, line)| {
-                let rendered = render_line(i, line);
-                let mut spans: Vec<Span<'static>> = Vec::with_capacity(rendered.spans.len() + 1);
+                let inner = render_spans(i, line, selected);
+                let mut spans: Vec<Span<'_>> = Vec::with_capacity(inner.len() + 1);
                 let prefix = if image_rows.get(i).copied().unwrap_or(false) {
                     " ".repeat(digits + 1)
                 } else {
                     format!("{:>width$} ", i + 1, width = digits)
                 };
                 spans.push(Span::styled(prefix, num_style));
-                spans.extend(rendered.spans);
+                spans.extend(inner);
                 Line::from(spans)
             })
             .collect();
@@ -87,11 +79,11 @@ pub fn render(
         frame.render_widget(paragraph, body_area);
         (digits + 1) as u16
     } else {
-        let lines: Vec<Line<'static>> = params
+        let lines: Vec<Line<'_>> = params
             .lines
             .iter()
             .enumerate()
-            .map(|(i, line)| render_line(i, line))
+            .map(|(i, line)| Line::from(render_spans(i, line, selected)))
             .collect();
         let paragraph = Paragraph::new(lines).scroll((params.scroll, 0));
         frame.render_widget(paragraph, body_area);
@@ -117,12 +109,26 @@ pub fn render(
     }
 }
 
-fn compute_image_rows(
-    total_lines: usize,
-    images: &[ImageRef],
-    _scroll: u16,
-    _body: Rect,
-) -> Vec<bool> {
+/// Borrow each span's text instead of cloning the owned String inside
+/// ratatui's `Cow::Owned(String)` — saves O(content) allocations per frame.
+/// The selected link's line is the only one whose spans actually need to be
+/// rebuilt (split + reverse-modifier).
+fn render_spans<'a>(
+    i: usize,
+    line: &'a Line<'static>,
+    selected: Option<&LinkRef>,
+) -> Vec<Span<'a>> {
+    match selected {
+        Some(link) if link.line == i => highlight_range(line, link.col_start, link.col_end).spans,
+        _ => line
+            .spans
+            .iter()
+            .map(|s| Span::styled(s.content.as_ref(), s.style))
+            .collect(),
+    }
+}
+
+fn compute_image_rows(total_lines: usize, images: &[ImageRef]) -> Vec<bool> {
     let mut v = vec![false; total_lines];
     for img in images {
         let start = img.line_offset.min(total_lines);
@@ -146,8 +152,6 @@ fn render_images(
     let body_top = body.y as i32;
     let body_bottom = (body.y + body.height) as i32;
 
-    let line_offset_gutter = compute_gutter_width(images);
-
     for img in images {
         let on_screen_y = body_top + img.line_offset as i32 - scroll;
         let on_screen_bottom = on_screen_y + img.height as i32;
@@ -159,14 +163,10 @@ fn render_images(
         if visible_top >= visible_bottom {
             continue;
         }
-        let x = body.x + line_offset_gutter;
-        if x >= body.x + body.width {
-            continue;
-        }
         let rect = Rect {
-            x,
+            x: body.x,
             y: visible_top as u16,
-            width: body.width.saturating_sub(line_offset_gutter),
+            width: body.width,
             height: (visible_bottom - visible_top) as u16,
         };
         if rect.width == 0 || rect.height == 0 {
@@ -179,16 +179,12 @@ fn render_images(
                 let Some(loaded) = load_image(picker, &img.path) else {
                     continue;
                 };
-                image_cache.insert(img.path.clone(), loaded);
-                image_cache.get_mut(&img.path).expect("just inserted")
+                evict_if_full(image_cache, &img.path);
+                image_cache.entry(img.path.clone()).or_insert(loaded)
             }
         };
         frame.render_stateful_widget(StatefulImage::new(), rect, state);
     }
-}
-
-fn compute_gutter_width(_images: &[ImageRef]) -> u16 {
-    0
 }
 
 /// Apply `Modifier::REVERSED` to the character range `[col_start, col_end)` of
@@ -227,6 +223,22 @@ fn highlight_range(line: &Line<'static>, col_start: usize, col_end: usize) -> Li
         }
     }
     Line::from(out)
+}
+
+/// Cap on decoded images held in memory across browsing sessions. Images
+/// are dropped from the cache only when this is exceeded — drops are
+/// arbitrary (HashMap iteration order), which is acceptable since the goal
+/// is bounding memory, not optimizing reuse.
+const IMAGE_CACHE_CAP: usize = 32;
+
+fn evict_if_full(cache: &mut HashMap<PathBuf, StatefulProtocol>, keep: &PathBuf) {
+    if cache.len() < IMAGE_CACHE_CAP {
+        return;
+    }
+    let victim = cache.keys().find(|k| *k != keep).cloned();
+    if let Some(k) = victim {
+        cache.remove(&k);
+    }
 }
 
 fn load_image(picker: &Picker, path: &PathBuf) -> Option<StatefulProtocol> {

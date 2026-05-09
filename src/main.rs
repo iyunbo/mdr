@@ -93,6 +93,7 @@ fn run(
     tx: mpsc::Sender<LoadMsg>,
     rx: mpsc::Receiver<LoadMsg>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut needs_redraw = true;
     while app.running {
         while let Ok(msg) = rx.try_recv() {
             match msg {
@@ -102,17 +103,28 @@ fn run(
                 }
                 LoadMsg::Error(e) => app.set_error(e),
             }
+            needs_redraw = true;
         }
 
-        terminal.draw(|frame| ui::draw(frame, app))?;
+        if needs_redraw {
+            terminal.draw(|frame| ui::draw(frame, app))?;
+            needs_redraw = false;
+        }
 
         if !event::poll(Duration::from_millis(50))? {
             continue;
         }
         let term_size = terminal.size().unwrap_or_default();
         match event::read()? {
-            Event::Key(key) => handle_key(app, key, &tx, term_size.height),
-            Event::Mouse(m) => handle_mouse(app, m, &tx),
+            Event::Key(key) => {
+                handle_key(app, key, &tx, term_size.height);
+                needs_redraw = true;
+            }
+            Event::Mouse(m) => {
+                handle_mouse(app, m, &tx);
+                needs_redraw = true;
+            }
+            Event::Resize(_, _) => needs_redraw = true,
             _ => {}
         }
     }
@@ -323,11 +335,7 @@ fn activate_link(app: &mut App, tx: &mpsc::Sender<LoadMsg>) {
     };
     match link.target {
         LinkTarget::Local(path) => {
-            let is_md = matches!(
-                path.extension().and_then(|e| e.to_str()),
-                Some("md") | Some("markdown")
-            );
-            if !is_md {
+            if !fs::is_markdown_path(&path) {
                 app.status_message = Some(format!("Not a markdown file: {}", path.display()));
                 return;
             }
