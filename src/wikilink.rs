@@ -44,35 +44,36 @@ fn rewrite_line(
     base_dir: Option<&Path>,
     out: &mut String,
 ) {
+    let bytes = line.as_bytes();
+    let mut i = 0;
     let mut in_inline = false;
-    let mut iter = line.char_indices().peekable();
-    while let Some((i, ch)) = iter.next() {
-        if ch == '`' {
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'`' {
             in_inline = !in_inline;
             out.push('`');
+            i += 1;
             continue;
         }
         if !in_inline
-            && ch == '['
-            && matches!(iter.peek(), Some((_, '[')))
+            && c == b'['
+            && bytes.get(i + 1) == Some(&b'[')
             && let Some((inner_len, replacement)) =
                 parse_wikilink(&line[i + 2..], tree_index, base_dir)
         {
             out.push_str(&replacement);
-            // Skip past `[[` + inner + `]]`. The leading `[` was already
-            // consumed by the iterator; advance past the rest by stepping
-            // until the byte index moves past `i + 2 + inner_len + 2`.
-            let target = i + 2 + inner_len + 2;
-            // We've already accepted the first `[`; skip forward.
-            while let Some(&(j, _)) = iter.peek() {
-                if j >= target {
-                    break;
-                }
-                iter.next();
-            }
+            i += 2 + inner_len + 2;
             continue;
         }
-        out.push(ch);
+        // Copy one full UTF-8 char. `[` and backtick are ASCII so all branches
+        // above are safe at this byte position.
+        let next = line[i..]
+            .char_indices()
+            .nth(1)
+            .map(|(j, _)| i + j)
+            .unwrap_or(line.len());
+        out.push_str(&line[i..next]);
+        i = next;
     }
 }
 
@@ -136,8 +137,11 @@ fn escape_link_text(s: &str) -> String {
 }
 
 fn escape_link_target(s: &str) -> String {
+    // Angle-bracket form for URLs that contain whitespace or parens.
+    // CommonMark angle-bracket targets cannot contain `>`; paths with `>` are
+    // exotic enough to leave un-escaped (worst case the link doesn't resolve).
     if s.contains(' ') || s.contains('(') || s.contains(')') {
-        format!("<{}>", s.replace('>', "\\>"))
+        format!("<{}>", s)
     } else {
         s.to_string()
     }

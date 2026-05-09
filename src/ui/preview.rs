@@ -50,33 +50,36 @@ pub fn render(
     let image_rows: Vec<bool> =
         compute_image_rows(params.lines.len(), params.images, params.scroll, body_area);
 
-    // Apply the selected-link highlight to its line before line-number prefixing.
-    let highlighted: Vec<Line<'static>> =
-        match params.selected_link.and_then(|i| params.links.get(i)) {
-            Some(link) if link.line < params.lines.len() => {
-                let mut v: Vec<Line<'static>> = params.lines.to_vec();
-                v[link.line] = highlight_range(&v[link.line], link.col_start, link.col_end);
-                v
-            }
-            _ => params.lines.to_vec(),
-        };
+    let selected = params
+        .selected_link
+        .and_then(|i| params.links.get(i))
+        .filter(|link| link.line < params.lines.len());
+
+    let render_line = |i: usize, line: &Line<'static>| -> Line<'static> {
+        match selected {
+            Some(link) if link.line == i => highlight_range(line, link.col_start, link.col_end),
+            _ => line.clone(),
+        }
+    };
 
     let gutter_width: u16 = if params.show_line_numbers {
-        let total = highlighted.len();
+        let total = params.lines.len();
         let digits = total.to_string().len().max(2);
         let num_style = Style::default().fg(params.line_number_color);
-        let numbered: Vec<Line<'static>> = highlighted
-            .into_iter()
+        let numbered: Vec<Line<'static>> = params
+            .lines
+            .iter()
             .enumerate()
             .map(|(i, line)| {
-                let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 1);
+                let rendered = render_line(i, line);
+                let mut spans: Vec<Span<'static>> = Vec::with_capacity(rendered.spans.len() + 1);
                 let prefix = if image_rows.get(i).copied().unwrap_or(false) {
                     " ".repeat(digits + 1)
                 } else {
                     format!("{:>width$} ", i + 1, width = digits)
                 };
                 spans.push(Span::styled(prefix, num_style));
-                spans.extend(line.spans);
+                spans.extend(rendered.spans);
                 Line::from(spans)
             })
             .collect();
@@ -84,7 +87,13 @@ pub fn render(
         frame.render_widget(paragraph, body_area);
         (digits + 1) as u16
     } else {
-        let paragraph = Paragraph::new(highlighted).scroll((params.scroll, 0));
+        let lines: Vec<Line<'static>> = params
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| render_line(i, line))
+            .collect();
+        let paragraph = Paragraph::new(lines).scroll((params.scroll, 0));
         frame.render_widget(paragraph, body_area);
         0
     };

@@ -72,6 +72,8 @@ pub struct App {
     /// file currently visible; capped at HISTORY_CAP entries (oldest dropped).
     pub history: VecDeque<HistoryEntry>,
     pub history_pos: Option<usize>,
+    /// Set together by `nav_step` callers (paired with `pending_scroll`). The
+    /// next `set_content` applies the scroll and skips appending to history.
     pub suppress_history_push: bool,
     pub pending_scroll: Option<u16>,
     /// Cached parse of the current `content`. Cleared by `set_content` and
@@ -81,6 +83,9 @@ pub struct App {
     /// Lower-cased file-stem → absolute path index for wiki-link resolution.
     /// Cleared whenever the file tree mutates.
     tree_index: Option<HashMap<String, PathBuf>>,
+    /// Theme colors resolved from `config.theme` once at startup. Immutable
+    /// after that, so we don't re-`color_from_str` on every parse.
+    render_cfg: markdown::RenderConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -89,9 +94,20 @@ pub struct HistoryEntry {
     pub scroll: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavDir {
+    Back,
+    Forward,
+}
+
 impl App {
     pub fn new(config: Config) -> Self {
         let keymap = keys::build_keymap(&config);
+        let render_cfg = markdown::RenderConfig {
+            heading_color: markdown::color_from_str(&config.theme.heading_color),
+            code_color: markdown::color_from_str(&config.theme.code_color),
+            image_height: config.theme.image_height,
+        };
         Self {
             running: true,
             state: AppState::default(),
@@ -119,6 +135,7 @@ impl App {
             pending_scroll: None,
             cached_parse: None,
             tree_index: None,
+            render_cfg,
             status_message: None,
             picker: None,
             image_cache: HashMap::new(),
@@ -472,9 +489,6 @@ impl App {
         content: String,
         base_dir: Option<PathBuf>,
     ) {
-        // Save outgoing scroll BEFORE we rebind state, so a later nav_back
-        // restores it. Skip when the load is itself a nav (caller already
-        // handled bookkeeping).
         if !self.suppress_history_push {
             self.save_scroll_to_history();
         }
@@ -526,16 +540,15 @@ impl App {
         }
     }
 
-    /// Move the history cursor by `step` (-1 = back, +1 = forward). Returns
-    /// the target path and the scroll to restore, or `None` at a boundary.
-    pub fn nav_step(&mut self, step: i32) -> Option<(PathBuf, u16)> {
+    /// Move the history cursor in `dir`. Returns the target path and the
+    /// scroll to restore, or `None` at a boundary.
+    pub fn nav_step(&mut self, dir: NavDir) -> Option<(PathBuf, u16)> {
         let pos = self.history_pos?;
-        let new_pos = match step {
-            s if s < 0 && pos == 0 => return None,
-            s if s < 0 => pos - 1,
-            s if s > 0 && pos + 1 >= self.history.len() => return None,
-            s if s > 0 => pos + 1,
-            _ => return None,
+        let new_pos = match dir {
+            NavDir::Back if pos == 0 => return None,
+            NavDir::Back => pos - 1,
+            NavDir::Forward if pos + 1 >= self.history.len() => return None,
+            NavDir::Forward => pos + 1,
         };
         self.save_scroll_to_history();
         self.history_pos = Some(new_pos);
@@ -552,16 +565,11 @@ impl App {
         }
         let content = self.content.clone().unwrap_or_default();
         let base_dir = self.base_dir.clone();
-        let cfg = markdown::RenderConfig {
-            heading_color: markdown::color_from_str(&self.config.theme.heading_color),
-            code_color: markdown::color_from_str(&self.config.theme.code_color),
-            image_height: self.config.theme.image_height,
-        };
         let index = self.ensure_tree_index();
         let preprocessed = wikilink::rewrite(&content, index, base_dir.as_deref());
         let result = Rc::new(markdown::parse_full_with(
             &preprocessed,
-            &cfg,
+            &self.render_cfg,
             base_dir.as_deref(),
         ));
         self.cached_parse = Some(Rc::clone(&result));
@@ -787,9 +795,18 @@ impl App {
     }
 
     fn flat_len(node: &FileNode) -> usize {
-        let mut flat: Vec<&FileNode> = Vec::new();
-        Self::flatten_tree(node, &mut flat);
-        flat.len()
+        let mut n = 1;
+        if let FileNode::Dir {
+            children,
+            expanded: true,
+            ..
+        } = node
+        {
+            for child in children {
+                n += Self::flat_len(child);
+            }
+        }
+        n
     }
 }
 
@@ -1077,20 +1094,22 @@ mod tests {
         assert_eq!(app.history.len(), 3);
         assert_eq!(app.history_pos, Some(2));
 
-        let target = app.nav_step(-1).expect("expected back target");
+        let target = app.nav_step(NavDir::Back).expect("expected back target");
         assert_eq!(target.0, PathBuf::from("/n/B.md"));
         assert_eq!(target.1, 10);
         assert_eq!(app.history_pos, Some(1));
         assert_eq!(app.history[2].scroll, app.scroll);
 
-        let target = app.nav_step(-1).expect("expected back target");
+        let target = app.nav_step(NavDir::Back).expect("expected back target");
         assert_eq!(target.0, PathBuf::from("/n/A.md"));
         assert_eq!(target.1, 5);
         assert_eq!(app.history_pos, Some(0));
 
-        assert!(app.nav_step(-1).is_none());
+        assert!(app.nav_step(NavDir::Back).is_none());
 
-        let target = app.nav_step(1).expect("expected forward target");
+        let target = app
+            .nav_step(NavDir::Forward)
+            .expect("expected forward target");
         assert_eq!(target.0, PathBuf::from("/n/B.md"));
         assert_eq!(app.history_pos, Some(1));
     }
@@ -1105,8 +1124,8 @@ mod tests {
                 Some(PathBuf::from("/n")),
             );
         }
-        app.nav_step(-1);
-        app.nav_step(-1);
+        app.nav_step(NavDir::Back);
+        app.nav_step(NavDir::Back);
         assert_eq!(app.history_pos, Some(0));
         app.set_content(
             Some(PathBuf::from("/n/D.md")),

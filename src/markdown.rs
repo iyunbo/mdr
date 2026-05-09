@@ -5,6 +5,7 @@ use ratatui::{
 };
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy)]
 pub struct RenderConfig {
     pub heading_color: Color,
     pub code_color: Color,

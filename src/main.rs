@@ -7,7 +7,7 @@ mod markdown;
 mod ui;
 mod wikilink;
 
-use app::{App, AppState, SearchDirection};
+use app::{App, AppState, NavDir, SearchDirection};
 use clap::Parser;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
@@ -120,12 +120,11 @@ fn run(
 }
 
 fn handle_mouse(app: &mut App, m: MouseEvent, tx: &mpsc::Sender<LoadMsg>) {
+    if app.state == AppState::Loading {
+        return;
+    }
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            // Only meaningful in a state where a preview is visible.
-            if app.state == AppState::Loading {
-                return;
-            }
             if let Some(idx) = app.link_at_terminal(m.column, m.row) {
                 app.selected_link = Some(idx);
                 app.status_message = None;
@@ -137,7 +136,7 @@ fn handle_mouse(app: &mut App, m: MouseEvent, tx: &mpsc::Sender<LoadMsg>) {
             match app.state {
                 AppState::Viewing => app.scroll_down(),
                 AppState::Browsing => app.cursor_down(),
-                AppState::Loading => {}
+                AppState::Loading => unreachable!(),
             }
         }
         MouseEventKind::ScrollUp => {
@@ -145,7 +144,7 @@ fn handle_mouse(app: &mut App, m: MouseEvent, tx: &mpsc::Sender<LoadMsg>) {
             match app.state {
                 AppState::Viewing => app.scroll_up(),
                 AppState::Browsing => app.cursor_up(),
-                AppState::Loading => {}
+                AppState::Loading => unreachable!(),
             }
         }
         _ => {}
@@ -273,23 +272,22 @@ fn dispatch(
         (AppState::Viewing, Action::NextLink) => app.cycle_link(1, page),
         (AppState::Viewing, Action::PrevLink) => app.cycle_link(-1, page),
         (_, Action::NextLink) | (_, Action::PrevLink) => {}
-        (_, Action::NavBack) => nav_step(app, tx, -1),
-        (_, Action::NavForward) => nav_step(app, tx, 1),
+        (_, Action::NavBack) => nav_step(app, tx, NavDir::Back),
+        (_, Action::NavForward) => nav_step(app, tx, NavDir::Forward),
     }
 }
 
-fn nav_step(app: &mut App, tx: &mpsc::Sender<LoadMsg>, step: i32) {
-    match app.nav_step(step) {
+fn nav_step(app: &mut App, tx: &mpsc::Sender<LoadMsg>, dir: NavDir) {
+    match app.nav_step(dir) {
         Some((path, scroll)) => {
             app.suppress_history_push = true;
             app.pending_scroll = Some(scroll);
             spawn_load_path(app, tx, path);
         }
         None => {
-            let msg = if step < 0 {
-                "Already at oldest file"
-            } else {
-                "Already at newest file"
+            let msg = match dir {
+                NavDir::Back => "Already at oldest file",
+                NavDir::Forward => "Already at newest file",
             };
             app.status_message = Some(msg.to_string());
         }
