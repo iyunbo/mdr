@@ -6,6 +6,13 @@ pub fn read_file(path: &str) -> Result<String, AppError> {
     Ok(content)
 }
 
+pub fn is_markdown_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("md") | Some("markdown")
+    )
+}
+
 pub async fn read_file_async(path: PathBuf) -> Result<String, AppError> {
     tokio::fs::read_to_string(&path)
         .await
@@ -33,11 +40,44 @@ impl FileNode {
 
     pub fn is_markdown(&self) -> bool {
         match self {
-            FileNode::File(p) => matches!(
-                p.extension().and_then(|e| e.to_str()),
-                Some("md") | Some("markdown")
-            ),
+            FileNode::File(p) => is_markdown_path(p),
             FileNode::Dir { .. } => false,
+        }
+    }
+
+    /// Visit this node and (recursively) the children of any *expanded* dir,
+    /// in DFS order. Collapsed dirs are not descended; their `children` are
+    /// also typically empty since walks are lazy on first expansion. Closure
+    /// receives `(depth, node)` with depth 0 at the root.
+    pub fn visit_visible<'a, F: FnMut(usize, &'a FileNode)>(&'a self, depth: usize, f: &mut F) {
+        f(depth, self);
+        if let FileNode::Dir {
+            children,
+            expanded: true,
+            ..
+        } = self
+        {
+            for child in children {
+                child.visit_visible(depth + 1, f);
+            }
+        }
+    }
+
+    pub fn visible_count(&self) -> usize {
+        let mut n = 0;
+        self.visit_visible(0, &mut |_, _| n += 1);
+        n
+    }
+
+    /// Visit this node and (recursively) every descendant regardless of
+    /// expanded state. Use when the visitor cares about the *known* tree
+    /// (e.g. wiki-link index), not the visible projection.
+    pub fn visit_all<'a, F: FnMut(&'a FileNode)>(&'a self, f: &mut F) {
+        f(self);
+        if let FileNode::Dir { children, .. } = self {
+            for child in children {
+                child.visit_all(f);
+            }
         }
     }
 }

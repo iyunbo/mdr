@@ -1,6 +1,6 @@
 [package]
 name = "mdr"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
 description = "A terminal markdown reader with vi-style keybindings."
 license = "MIT OR Apache-2.0"

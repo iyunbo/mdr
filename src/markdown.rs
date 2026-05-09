@@ -313,7 +313,7 @@ pub fn parse_full_with(
             }
             Event::End(TagEnd::Table) => {
                 if let Some(buf) = table.take() {
-                    render_table(buf, &mut lines, config);
+                    render_table(buf, &mut lines);
                 }
             }
             Event::End(TagEnd::TableHead) => {
@@ -403,11 +403,15 @@ fn finalize_link(
     })
 }
 
+fn is_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
 fn resolve_link_target(dest: &str, base_dir: Option<&Path>) -> Option<LinkTarget> {
     if dest.is_empty() {
         return None;
     }
-    if dest.starts_with("http://") || dest.starts_with("https://") {
+    if is_url(dest) {
         return Some(LinkTarget::Url(dest.to_string()));
     }
     // Strip in-document anchors — `file.md#section` resolves to `file.md`.
@@ -425,7 +429,7 @@ fn resolve_link_target(dest: &str, base_dir: Option<&Path>) -> Option<LinkTarget
 }
 
 fn resolve_image_path(dest: &str, base_dir: Option<&Path>) -> Option<PathBuf> {
-    if dest.starts_with("http://") || dest.starts_with("https://") {
+    if is_url(dest) {
         return None;
     }
     let p = PathBuf::from(dest);
@@ -491,7 +495,7 @@ fn cell_width(cell: &[Span<'static>]) -> usize {
     cell.iter().map(|s| s.content.chars().count()).sum()
 }
 
-fn render_table(buf: TableBuf, lines: &mut Vec<Line<'static>>, _config: &RenderConfig) {
+fn render_table(buf: TableBuf, lines: &mut Vec<Line<'static>>) {
     let col_count = buf
         .head
         .len()
@@ -536,8 +540,7 @@ fn render_row(
     for (i, w) in widths.iter().enumerate().take(col_count) {
         let sep = if i == 0 { "│ " } else { " │ " };
         spans.push(Span::styled(sep, sep_style));
-        let empty: Vec<Span<'static>> = Vec::new();
-        let cell = row.get(i).unwrap_or(&empty);
+        let cell: &[Span<'static>] = row.get(i).map(Vec::as_slice).unwrap_or(&[]);
         let used: usize = cell_width(cell);
         for s in cell {
             spans.push(s.clone());

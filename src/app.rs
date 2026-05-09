@@ -159,7 +159,7 @@ impl App {
     }
 
     pub fn cursor_down(&mut self) {
-        let max = self.tree.as_ref().map(Self::flat_len).unwrap_or(0);
+        let max = self.tree.as_ref().map(FileNode::visible_count).unwrap_or(0);
         if max > 0 && self.tree_cursor + 1 < max {
             self.tree_cursor += 1;
         }
@@ -183,13 +183,7 @@ impl App {
                 self.scroll = idx.min(max) as u16;
             }
             AppState::Browsing => {
-                let max = self
-                    .tree
-                    .as_ref()
-                    .map(Self::flat_len)
-                    .unwrap_or(0)
-                    .saturating_sub(1);
-                self.tree_cursor = idx.min(max);
+                self.tree_cursor = idx.min(self.tree_max_index());
             }
             AppState::Loading => {}
         }
@@ -202,15 +196,7 @@ impl App {
                 let total = self.total_lines();
                 self.scroll = total.saturating_sub(page_size) as u16;
             }
-            AppState::Browsing => {
-                let max = self
-                    .tree
-                    .as_ref()
-                    .map(Self::flat_len)
-                    .unwrap_or(0)
-                    .saturating_sub(1);
-                self.tree_cursor = max;
-            }
+            AppState::Browsing => self.tree_cursor = self.tree_max_index(),
             AppState::Loading => {}
         }
     }
@@ -222,13 +208,7 @@ impl App {
                 self.scroll = self.scroll.saturating_add(half_page as u16).min(max);
             }
             AppState::Browsing => {
-                let max = self
-                    .tree
-                    .as_ref()
-                    .map(Self::flat_len)
-                    .unwrap_or(0)
-                    .saturating_sub(1);
-                self.tree_cursor = (self.tree_cursor + half_page).min(max);
+                self.tree_cursor = (self.tree_cursor + half_page).min(self.tree_max_index());
             }
             AppState::Loading => {}
         }
@@ -248,6 +228,14 @@ impl App {
 
     fn total_lines(&mut self) -> usize {
         self.parse_current().lines.len()
+    }
+
+    fn tree_max_index(&self) -> usize {
+        self.tree
+            .as_ref()
+            .map(FileNode::visible_count)
+            .unwrap_or(0)
+            .saturating_sub(1)
     }
 
     /// Append a digit to the count buffer (used for vi-style `Nj`, `Nk`).
@@ -387,27 +375,29 @@ impl App {
         }
     }
 
-    /// Search target lines for the current state.
-    fn search_target_lines(&mut self) -> Vec<String> {
+    /// Pre-lowercased search target for the current state. Lowercasing once
+    /// here avoids re-lowercasing each candidate line during the match loop.
+    fn search_target_lines_lower(&mut self) -> Vec<String> {
         match self.state {
             AppState::Viewing => self
                 .parse_current()
                 .lines
                 .iter()
                 .map(|line| {
-                    line.spans
-                        .iter()
-                        .map(|s| s.content.as_ref())
-                        .collect::<String>()
+                    let mut s = String::new();
+                    for span in &line.spans {
+                        s.push_str(span.content.as_ref());
+                    }
+                    s.to_lowercase()
                 })
                 .collect(),
             AppState::Browsing => {
                 let Some(tree) = self.tree.as_ref() else {
                     return Vec::new();
                 };
-                let mut flat: Vec<&FileNode> = Vec::new();
-                Self::flatten_tree(tree, &mut flat);
-                flat.iter().map(|n| n.name().to_string()).collect()
+                let mut names = Vec::new();
+                tree.visit_visible(0, &mut |_, n| names.push(n.name().to_lowercase()));
+                names
             }
             AppState::Loading => Vec::new(),
         }
@@ -441,7 +431,7 @@ impl App {
         if query.is_empty() {
             return false;
         }
-        let lines = self.search_target_lines();
+        let lines = self.search_target_lines_lower();
         let n = lines.len();
         if n == 0 {
             return false;
@@ -469,7 +459,7 @@ impl App {
         };
 
         for i in order {
-            if lines[i].to_lowercase().contains(&q) {
+            if lines[i].contains(&q) {
                 self.jump_to(i);
                 return true;
             }
@@ -503,7 +493,9 @@ impl App {
         self.base_dir = base_dir;
         self.scroll = self.pending_scroll.take().unwrap_or(0);
         self.state = AppState::Viewing;
-        self.image_cache.clear();
+        // Note: image_cache is NOT cleared — keep decoded images so Back/Forward
+        // through history doesn't redecode. Capacity is bounded inside the
+        // renderer (see preview::render_images).
         self.selected_link = None;
         self.invalidate_parse_cache();
         if let Some(p) = path {
@@ -563,14 +555,16 @@ impl App {
         if let Some(cached) = &self.cached_parse {
             return Rc::clone(cached);
         }
-        let content = self.content.clone().unwrap_or_default();
-        let base_dir = self.base_dir.clone();
-        let index = self.ensure_tree_index();
-        let preprocessed = wikilink::rewrite(&content, index, base_dir.as_deref());
+        // Build the index first so the immutable borrow of `self.content`
+        // below doesn't fight the `&mut self` `ensure_tree_index` needs.
+        self.ensure_tree_index();
+        let content = self.content.as_deref().unwrap_or("");
+        let base_dir = self.base_dir.as_deref();
+        let preprocessed = wikilink::rewrite(content, self.tree_index.as_ref(), base_dir);
         let result = Rc::new(markdown::parse_full_with(
             &preprocessed,
             &self.render_cfg,
-            base_dir.as_deref(),
+            base_dir,
         ));
         self.cached_parse = Some(Rc::clone(&result));
         result
@@ -668,9 +662,18 @@ impl App {
 
     pub fn selected_node(&self) -> Option<&FileNode> {
         let tree = self.tree.as_ref()?;
-        let mut flat: Vec<&FileNode> = Vec::new();
-        Self::flatten_tree(tree, &mut flat);
-        flat.get(self.tree_cursor).copied()
+        let target = self.tree_cursor;
+        let mut counter = 0usize;
+        let mut found: Option<&FileNode> = None;
+        tree.visit_visible(0, &mut |_, n| {
+            if found.is_none() {
+                if counter == target {
+                    found = Some(n);
+                }
+                counter += 1;
+            }
+        });
+        found
     }
 
     /// Toggle expand/collapse on the dir at the cursor.
@@ -772,63 +775,24 @@ impl App {
     }
 
     fn clamp_cursor(&mut self) {
-        let len = self.tree.as_ref().map(Self::flat_len).unwrap_or(0);
+        let len = self.tree.as_ref().map(FileNode::visible_count).unwrap_or(0);
         if len == 0 {
             self.tree_cursor = 0;
         } else if self.tree_cursor >= len {
             self.tree_cursor = len - 1;
         }
     }
-
-    fn flatten_tree<'a>(node: &'a FileNode, out: &mut Vec<&'a FileNode>) {
-        out.push(node);
-        if let FileNode::Dir {
-            children,
-            expanded: true,
-            ..
-        } = node
-        {
-            for child in children {
-                Self::flatten_tree(child, out);
-            }
-        }
-    }
-
-    fn flat_len(node: &FileNode) -> usize {
-        let mut n = 1;
-        if let FileNode::Dir {
-            children,
-            expanded: true,
-            ..
-        } = node
-        {
-            for child in children {
-                n += Self::flat_len(child);
-            }
-        }
-        n
-    }
 }
 
 fn build_tree_index(node: &FileNode, out: &mut HashMap<String, PathBuf>) {
-    match node {
-        FileNode::File(p) => {
-            if !matches!(
-                p.extension().and_then(|e| e.to_str()),
-                Some("md") | Some("markdown")
-            ) {
-                return;
-            }
-            if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                out.entry(stem.to_lowercase()).or_insert_with(|| p.clone());
-            }
+    node.visit_all(&mut |n| {
+        if let FileNode::File(p) = n
+            && fs::is_markdown_path(p)
+            && let Some(stem) = p.file_stem().and_then(|s| s.to_str())
+        {
+            out.entry(stem.to_lowercase()).or_insert_with(|| p.clone());
         }
-        FileNode::Dir { children, .. } => {
-            for child in children {
-                build_tree_index(child, out);
-            }
-        }
-    }
+    });
 }
 
 #[cfg(test)]
@@ -849,9 +813,9 @@ mod tests {
         let tree = fs::walk_dir(dir.path()).unwrap();
         let mut app = make_app_with_tree(tree);
 
-        assert_eq!(App::flat_len(app.tree.as_ref().unwrap()), 2); // root + a.md
+        assert_eq!(app.tree.as_ref().unwrap().visible_count(), 2); // root + a.md
         app.toggle_selected().unwrap(); // root is at cursor 0, expanded — collapse
-        assert_eq!(App::flat_len(app.tree.as_ref().unwrap()), 1); // root only
+        assert_eq!(app.tree.as_ref().unwrap().visible_count(), 1); // root only
     }
 
     #[test]
@@ -863,11 +827,11 @@ mod tests {
         let mut app = make_app_with_tree(tree);
 
         // Initially: root (expanded) + sub (collapsed). flat_len = 2. Children of `sub` not loaded yet.
-        assert_eq!(App::flat_len(app.tree.as_ref().unwrap()), 2);
+        assert_eq!(app.tree.as_ref().unwrap().visible_count(), 2);
         app.tree_cursor = 1; // on `sub`
         app.toggle_selected().unwrap();
         // After expanding `sub`, its `inner.md` should appear.
-        assert_eq!(App::flat_len(app.tree.as_ref().unwrap()), 3);
+        assert_eq!(app.tree.as_ref().unwrap().visible_count(), 3);
     }
 
     #[test]
@@ -1190,7 +1154,7 @@ mod tests {
 
         app.tree_cursor = 0; // on root
         app.collapse_selected(); // collapses root
-        assert_eq!(App::flat_len(app.tree.as_ref().unwrap()), 1);
+        assert_eq!(app.tree.as_ref().unwrap().visible_count(), 1);
         assert_eq!(app.tree_cursor, 0); // clamped from 0 (still in range)
     }
 }

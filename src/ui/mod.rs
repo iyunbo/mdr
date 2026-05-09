@@ -31,21 +31,28 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 fn draw_browsing(frame: &mut Frame, area: Rect, app: &mut App) {
-    let Some(tree) = app.tree.clone() else {
+    if app.tree.is_none() {
         let widget = Paragraph::new("No directory loaded")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
         frame.render_widget(widget, area);
         app.last_preview_body = None;
         return;
-    };
+    }
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
         .split(area);
 
-    file_tree::render(frame, chunks[0], &tree, app.tree_cursor);
+    // Tree pane: borrow `&app.tree` directly. The borrow ends before the
+    // `&mut app` for the preview pane below — no need to clone the tree.
+    file_tree::render(
+        frame,
+        chunks[0],
+        app.tree.as_ref().expect("checked above"),
+        app.tree_cursor,
+    );
 
     if app.content.is_some() {
         render_preview(frame, chunks[1], app);
