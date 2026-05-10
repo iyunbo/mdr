@@ -1,4 +1,4 @@
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RenderConfig {
+    pub h1_color: Color,
     pub heading_color: Color,
     pub code_color: Color,
     pub image_height: u16,
@@ -15,9 +16,20 @@ pub struct RenderConfig {
 impl Default for RenderConfig {
     fn default() -> Self {
         Self {
+            h1_color: Color::LightRed,
             heading_color: Color::Cyan,
             code_color: Color::Yellow,
             image_height: 12,
+        }
+    }
+}
+
+impl RenderConfig {
+    fn heading_color_for(&self, level: HeadingLevel) -> Color {
+        if level == HeadingLevel::H1 {
+            self.h1_color
+        } else {
+            self.heading_color
         }
     }
 }
@@ -68,6 +80,12 @@ pub fn color_from_str(s: &str) -> Color {
         "black" => Color::Black,
         "gray" | "grey" => Color::Gray,
         "darkgray" | "dark_gray" | "darkgrey" | "dark_grey" => Color::DarkGray,
+        "lightred" | "light_red" => Color::LightRed,
+        "lightgreen" | "light_green" => Color::LightGreen,
+        "lightblue" | "light_blue" => Color::LightBlue,
+        "lightcyan" | "light_cyan" => Color::LightCyan,
+        "lightyellow" | "light_yellow" => Color::LightYellow,
+        "lightmagenta" | "light_magenta" => Color::LightMagenta,
         _ => Color::White,
     }
 }
@@ -112,6 +130,7 @@ pub fn parse_full_with(
     let mut current_style = Style::default();
     let mut current_heading: Option<HeadingLevel> = None;
     let mut table: Option<TableBuf> = None;
+    let code_border_style = Style::default().fg(Color::DarkGray);
     let mut in_code_block = false;
     let mut current_image: Option<PendingImage> = None;
     let mut current_link: Option<PendingLink> = None;
@@ -131,7 +150,7 @@ pub fn parse_full_with(
                     record: table.is_none(),
                 });
                 current_style = current_style
-                    .fg(Color::Blue)
+                    .fg(Color::Cyan)
                     .add_modifier(Modifier::UNDERLINED);
             }
             Event::End(TagEnd::Link) => {
@@ -222,7 +241,7 @@ pub fn parse_full_with(
                 if !indent.is_empty() {
                     spans.push(Span::raw(indent));
                 }
-                spans.push(Span::styled(bullet, Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(bullet, Style::default().fg(Color::White)));
             }
             Event::End(TagEnd::Item) if !spans.is_empty() => {
                 lines.push(Line::from(std::mem::take(&mut spans)));
@@ -243,14 +262,27 @@ pub fn parse_full_with(
                 }
             }
             Event::Start(Tag::TableRow) | Event::Start(Tag::TableCell) => {}
-            Event::Start(Tag::CodeBlock(_)) => {
+            Event::Start(Tag::CodeBlock(kind)) => {
                 flush_block(&mut spans, &mut lines);
+                let lang = match kind {
+                    CodeBlockKind::Fenced(s) if !s.is_empty() => Some(s.to_string()),
+                    _ => None,
+                };
+                let mut top: Vec<Span<'static>> = vec![Span::styled("┌─", code_border_style)];
+                if let Some(ref l) = lang {
+                    top.push(Span::styled(
+                        format!("  {}", l),
+                        code_border_style.add_modifier(Modifier::ITALIC),
+                    ));
+                }
+                lines.push(Line::from(top));
                 in_code_block = true;
             }
             Event::End(TagEnd::CodeBlock) => {
                 if !spans.is_empty() {
                     lines.push(Line::from(std::mem::take(&mut spans)));
                 }
+                lines.push(Line::from(Span::styled("└─", code_border_style)));
                 lines.push(Line::default());
                 in_code_block = false;
             }
@@ -260,14 +292,21 @@ pub fn parse_full_with(
                 }
             }
             Event::Text(text) if in_code_block => {
-                let style = Style::default().fg(config.code_color);
+                let code_style = Style::default().fg(config.code_color);
                 let s = text.to_string();
                 let mut chunks = s.split('\n').peekable();
                 while let Some(chunk) = chunks.next() {
+                    let has_next = chunks.peek().is_some();
                     if !chunk.is_empty() {
-                        spans.push(Span::styled(chunk.to_string(), style));
+                        if spans.is_empty() {
+                            spans.push(Span::styled("│ ", code_border_style));
+                        }
+                        spans.push(Span::styled(chunk.to_string(), code_style));
+                    } else if has_next {
+                        lines.push(Line::from(Span::styled("│", code_border_style)));
+                        continue;
                     }
-                    if chunks.peek().is_some() {
+                    if has_next {
                         lines.push(Line::from(std::mem::take(&mut spans)));
                     }
                 }
@@ -296,7 +335,7 @@ pub fn parse_full_with(
                     let underline = ch.to_string().repeat(text_len.max(1));
                     lines.push(Line::from(Span::styled(
                         underline,
-                        Style::default().fg(config.heading_color),
+                        Style::default().fg(config.heading_color_for(level)),
                     )));
                 }
                 lines.push(Line::default());
@@ -458,7 +497,7 @@ fn flush_block(spans: &mut Vec<Span<'static>>, lines: &mut Vec<Line<'static>>) {
 fn heading_style(level: HeadingLevel, config: &RenderConfig) -> Style {
     use HeadingLevel::*;
     let base = Style::default()
-        .fg(config.heading_color)
+        .fg(config.heading_color_for(level))
         .add_modifier(Modifier::BOLD);
     match level {
         H1 | H2 | H3 => base,
@@ -630,6 +669,7 @@ mod tests {
     #[test]
     fn test_heading_color_overridable() {
         let cfg = RenderConfig {
+            h1_color: Color::Magenta,
             heading_color: Color::Red,
             code_color: Color::Green,
             image_height: 12,
@@ -639,8 +679,15 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter())
             .find(|s| s.content.as_ref() == "H")
-            .expect("expected heading text");
-        assert_eq!(span.style.fg, Some(Color::Red));
+            .expect("expected h1 heading text");
+        assert_eq!(span.style.fg, Some(Color::Magenta));
+        let lines2 = parse_with_config("## H2", &cfg);
+        let span2 = lines2
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.as_ref() == "H2")
+            .expect("expected h2 heading text");
+        assert_eq!(span2.style.fg, Some(Color::Red));
     }
 
     #[test]
@@ -752,6 +799,7 @@ mod tests {
     #[test]
     fn test_code_block_lines_use_code_color() {
         let cfg = RenderConfig {
+            h1_color: Color::White,
             heading_color: Color::Cyan,
             code_color: Color::Magenta,
             image_height: 12,
@@ -824,6 +872,7 @@ mod tests {
     #[test]
     fn test_image_local_path_resolves_relative_to_base_dir() {
         let cfg = RenderConfig {
+            h1_color: Color::White,
             heading_color: Color::Cyan,
             code_color: Color::Yellow,
             image_height: 5,
@@ -853,6 +902,7 @@ mod tests {
     #[test]
     fn test_image_reserves_height_rows_in_lines() {
         let cfg = RenderConfig {
+            h1_color: Color::White,
             heading_color: Color::Cyan,
             code_color: Color::Yellow,
             image_height: 8,
@@ -960,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn test_link_text_is_blue_and_underlined() {
+    fn test_link_text_is_cyan_and_underlined() {
         let result = parse_full("[styled](x.md)");
         let span = result
             .lines
@@ -968,7 +1018,7 @@ mod tests {
             .flat_map(|l| l.spans.iter())
             .find(|s| s.content.as_ref() == "styled")
             .expect("expected styled link span");
-        assert_eq!(span.style.fg, Some(Color::Blue));
+        assert_eq!(span.style.fg, Some(Color::Cyan));
         assert!(span.style.add_modifier.contains(Modifier::UNDERLINED));
     }
 
@@ -986,7 +1036,7 @@ mod tests {
             .flat_map(|l| l.spans.iter())
             .find(|s| s.content.as_ref() == "x")
             .expect("expected link text in table");
-        assert_eq!(span.style.fg, Some(Color::Blue));
+        assert_eq!(span.style.fg, Some(Color::Cyan));
     }
 
     #[test]

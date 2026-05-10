@@ -29,6 +29,8 @@ fn default_mouse() -> bool {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ThemeConfig {
+    #[serde(default = "default_h1_color")]
+    pub h1_color: String,
     pub heading_color: String,
     pub code_color: String,
     #[serde(default = "default_line_number_color")]
@@ -37,6 +39,10 @@ pub struct ThemeConfig {
     pub show_line_numbers: bool,
     #[serde(default = "default_image_height")]
     pub image_height: u16,
+}
+
+fn default_h1_color() -> String {
+    "lightred".to_string()
 }
 
 fn default_line_number_color() -> String {
@@ -72,6 +78,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             theme: ThemeConfig {
+                h1_color: default_h1_color(),
                 heading_color: "cyan".to_string(),
                 code_color: "yellow".to_string(),
                 line_number_color: default_line_number_color(),
