@@ -268,8 +268,7 @@ pub fn parse_full_with(
                     CodeBlockKind::Fenced(s) if !s.is_empty() => Some(s.to_string()),
                     _ => None,
                 };
-                let mut top: Vec<Span<'static>> =
-                    vec![Span::styled("┌─", code_border_style)];
+                let mut top: Vec<Span<'static>> = vec![Span::styled("┌─", code_border_style)];
                 if let Some(ref l) = lang {
                     top.push(Span::styled(
                         format!("  {}", l),
