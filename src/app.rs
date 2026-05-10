@@ -104,6 +104,7 @@ impl App {
     pub fn new(config: Config) -> Self {
         let keymap = keys::build_keymap(&config);
         let render_cfg = markdown::RenderConfig {
+            h1_color: markdown::color_from_str(&config.theme.h1_color),
             heading_color: markdown::color_from_str(&config.theme.heading_color),
             code_color: markdown::color_from_str(&config.theme.code_color),
             image_height: config.theme.image_height,
