@@ -54,7 +54,7 @@ mdr file.md          # open a file directly
 | `q`, `Ctrl+C`      | quit                                          |
 
 `Tab` / `Shift+Tab` cycles through links in the preview; `Enter` follows the
-highlighted link. A left mouse click on a link opens it directly. Anchors
+highlighted link. A left mouse click on a link opens it directly. To copy text, use **Shift+drag** — most terminals perform native selection even while mouse capture is active. Anchors
 (`file.md#section`) strip to the file path. URLs are launched via the system
 browser (`open` on macOS, `xdg-open` on Linux). Obsidian wiki-links resolve
 by searching the loaded file tree for a matching `.md` filename
