@@ -24,6 +24,16 @@ impl Default for RenderConfig {
     }
 }
 
+impl RenderConfig {
+    fn heading_color_for(&self, level: HeadingLevel) -> Color {
+        if level == HeadingLevel::H1 {
+            self.h1_color
+        } else {
+            self.heading_color
+        }
+    }
+}
+
 /// A reference to an image embedded in the rendered output.
 /// `line_offset` is the row index within the rendered `lines` where the image
 /// starts; the image occupies `height` rows. `alt` is the markdown alt text.
@@ -120,6 +130,7 @@ pub fn parse_full_with(
     let mut current_style = Style::default();
     let mut current_heading: Option<HeadingLevel> = None;
     let mut table: Option<TableBuf> = None;
+    let code_border_style = Style::default().fg(Color::DarkGray);
     let mut in_code_block = false;
     let mut current_image: Option<PendingImage> = None;
     let mut current_link: Option<PendingLink> = None;
@@ -257,13 +268,12 @@ pub fn parse_full_with(
                     CodeBlockKind::Fenced(s) if !s.is_empty() => Some(s.to_string()),
                     _ => None,
                 };
-                let border_style = Style::default().fg(Color::DarkGray);
                 let mut top: Vec<Span<'static>> =
-                    vec![Span::styled("┌─", border_style)];
+                    vec![Span::styled("┌─", code_border_style)];
                 if let Some(ref l) = lang {
                     top.push(Span::styled(
                         format!("  {}", l),
-                        border_style.add_modifier(Modifier::ITALIC),
+                        code_border_style.add_modifier(Modifier::ITALIC),
                     ));
                 }
                 lines.push(Line::from(top));
@@ -273,10 +283,7 @@ pub fn parse_full_with(
                 if !spans.is_empty() {
                     lines.push(Line::from(std::mem::take(&mut spans)));
                 }
-                lines.push(Line::from(Span::styled(
-                    "└─",
-                    Style::default().fg(Color::DarkGray),
-                )));
+                lines.push(Line::from(Span::styled("└─", code_border_style)));
                 lines.push(Line::default());
                 in_code_block = false;
             }
@@ -287,18 +294,17 @@ pub fn parse_full_with(
             }
             Event::Text(text) if in_code_block => {
                 let code_style = Style::default().fg(config.code_color);
-                let border_style = Style::default().fg(Color::DarkGray);
                 let s = text.to_string();
                 let mut chunks = s.split('\n').peekable();
                 while let Some(chunk) = chunks.next() {
                     let has_next = chunks.peek().is_some();
                     if !chunk.is_empty() {
                         if spans.is_empty() {
-                            spans.push(Span::styled("│ ", border_style));
+                            spans.push(Span::styled("│ ", code_border_style));
                         }
                         spans.push(Span::styled(chunk.to_string(), code_style));
                     } else if has_next {
-                        lines.push(Line::from(Span::styled("│", border_style)));
+                        lines.push(Line::from(Span::styled("│", code_border_style)));
                         continue;
                     }
                     if has_next {
@@ -328,14 +334,9 @@ pub fn parse_full_with(
                 }
                 if let Some(ch) = underline_char(level) {
                     let underline = ch.to_string().repeat(text_len.max(1));
-                    let underline_color = if level == HeadingLevel::H1 {
-                        config.h1_color
-                    } else {
-                        config.heading_color
-                    };
                     lines.push(Line::from(Span::styled(
                         underline,
-                        Style::default().fg(underline_color),
+                        Style::default().fg(config.heading_color_for(level)),
                     )));
                 }
                 lines.push(Line::default());
@@ -496,12 +497,9 @@ fn flush_block(spans: &mut Vec<Span<'static>>, lines: &mut Vec<Line<'static>>) {
 
 fn heading_style(level: HeadingLevel, config: &RenderConfig) -> Style {
     use HeadingLevel::*;
-    let color = if level == H1 {
-        config.h1_color
-    } else {
-        config.heading_color
-    };
-    let base = Style::default().fg(color).add_modifier(Modifier::BOLD);
+    let base = Style::default()
+        .fg(config.heading_color_for(level))
+        .add_modifier(Modifier::BOLD);
     match level {
         H1 | H2 | H3 => base,
         H4 | H5 | H6 => base.add_modifier(Modifier::ITALIC),
@@ -677,7 +675,6 @@ mod tests {
             code_color: Color::Green,
             image_height: 12,
         };
-        // H1 uses h1_color
         let lines = parse_with_config("# H", &cfg);
         let span = lines
             .iter()
@@ -685,7 +682,6 @@ mod tests {
             .find(|s| s.content.as_ref() == "H")
             .expect("expected h1 heading text");
         assert_eq!(span.style.fg, Some(Color::Magenta));
-        // H2 uses heading_color
         let lines2 = parse_with_config("## H2", &cfg);
         let span2 = lines2
             .iter()
