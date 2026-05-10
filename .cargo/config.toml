@@ -1,0 +1,3 @@
+[alias]
+# UI / event-loop modules need a mock terminal to test, so they're excluded.
+coverage = "llvm-cov --ignore-filename-regex /src/(ui/|main\\.rs)"
