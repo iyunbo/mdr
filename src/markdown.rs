@@ -5,12 +5,14 @@ use ratatui::{
 };
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RenderConfig {
     pub h1_color: Color,
     pub heading_color: Color,
     pub code_color: Color,
     pub image_height: u16,
+    pub syntax_highlight: bool,
+    pub syntax_theme: String,
 }
 
 impl Default for RenderConfig {
@@ -20,6 +22,8 @@ impl Default for RenderConfig {
             heading_color: Color::Cyan,
             code_color: Color::Yellow,
             image_height: 12,
+            syntax_highlight: true,
+            syntax_theme: "base16-ocean.dark".to_string(),
         }
     }
 }
@@ -132,6 +136,8 @@ pub fn parse_full_with(
     let mut table: Option<TableBuf> = None;
     let code_border_style = Style::default().fg(Color::DarkGray);
     let mut in_code_block = false;
+    let mut code_lang: Option<String> = None;
+    let mut code_buffer = String::new();
     let mut current_image: Option<PendingImage> = None;
     let mut current_link: Option<PendingLink> = None;
     let mut list_stack: Vec<Option<u64>> = Vec::new();
@@ -276,14 +282,22 @@ pub fn parse_full_with(
                     ));
                 }
                 lines.push(Line::from(top));
+                code_lang = lang;
+                code_buffer.clear();
                 in_code_block = true;
             }
             Event::End(TagEnd::CodeBlock) => {
-                if !spans.is_empty() {
-                    lines.push(Line::from(std::mem::take(&mut spans)));
-                }
+                emit_code_block(
+                    &code_buffer,
+                    code_lang.as_deref(),
+                    config,
+                    code_border_style,
+                    &mut lines,
+                );
                 lines.push(Line::from(Span::styled("└─", code_border_style)));
                 lines.push(Line::default());
+                code_lang = None;
+                code_buffer.clear();
                 in_code_block = false;
             }
             Event::Text(text) if current_image.is_some() => {
@@ -292,24 +306,7 @@ pub fn parse_full_with(
                 }
             }
             Event::Text(text) if in_code_block => {
-                let code_style = Style::default().fg(config.code_color);
-                let s = text.to_string();
-                let mut chunks = s.split('\n').peekable();
-                while let Some(chunk) = chunks.next() {
-                    let has_next = chunks.peek().is_some();
-                    if !chunk.is_empty() {
-                        if spans.is_empty() {
-                            spans.push(Span::styled("│ ", code_border_style));
-                        }
-                        spans.push(Span::styled(chunk.to_string(), code_style));
-                    } else if has_next {
-                        lines.push(Line::from(Span::styled("│", code_border_style)));
-                        continue;
-                    }
-                    if has_next {
-                        lines.push(Line::from(std::mem::take(&mut spans)));
-                    }
-                }
+                code_buffer.push_str(&text);
             }
             Event::Text(text) => {
                 push_span(
@@ -494,6 +491,156 @@ fn flush_block(spans: &mut Vec<Span<'static>>, lines: &mut Vec<Line<'static>>) {
     }
 }
 
+/// Render an accumulated code block into `lines`. When syntax highlighting is
+/// enabled and the language resolves to a known syntect grammar, tokens are
+/// emitted as separate styled spans; otherwise each line is rendered with the
+/// plain `code_color` fallback. The opening top-border line and closing
+/// bottom-border line are added by the caller.
+fn emit_code_block(
+    code: &str,
+    lang: Option<&str>,
+    config: &RenderConfig,
+    border_style: Style,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let code_style = Style::default().fg(config.code_color);
+    let highlighted = if config.syntax_highlight {
+        lang.and_then(highlight::find_syntax)
+            .zip(highlight::find_theme(&config.syntax_theme))
+    } else {
+        None
+    };
+
+    let body: Vec<Vec<Span<'static>>> = if let Some((syn, theme)) = highlighted {
+        highlight::highlight(code, syn, theme, code_style)
+    } else {
+        code.split('\n')
+            .map(|line| {
+                if line.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Span::styled(line.to_string(), code_style)]
+                }
+            })
+            .collect()
+    };
+
+    // pulldown-cmark emits a trailing newline at the end of fenced blocks,
+    // which produces a spurious empty final line. Drop it.
+    let mut body = body;
+    if body.last().is_some_and(|v| v.is_empty()) {
+        body.pop();
+    }
+
+    for line_spans in body {
+        if line_spans.is_empty() {
+            lines.push(Line::from(Span::styled("│", border_style)));
+        } else {
+            let mut row: Vec<Span<'static>> = Vec::with_capacity(line_spans.len() + 1);
+            row.push(Span::styled("│ ", border_style));
+            row.extend(line_spans);
+            lines.push(Line::from(row));
+        }
+    }
+}
+
+mod highlight {
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::Span;
+    use std::sync::OnceLock;
+    use syntect::easy::HighlightLines;
+    use syntect::highlighting::{FontStyle, Style as SynStyle, Theme, ThemeSet};
+    use syntect::parsing::{SyntaxReference, SyntaxSet};
+    use syntect::util::LinesWithEndings;
+
+    fn syntax_set() -> &'static SyntaxSet {
+        static SET: OnceLock<SyntaxSet> = OnceLock::new();
+        SET.get_or_init(SyntaxSet::load_defaults_newlines)
+    }
+
+    fn theme_set() -> &'static ThemeSet {
+        static SET: OnceLock<ThemeSet> = OnceLock::new();
+        SET.get_or_init(ThemeSet::load_defaults)
+    }
+
+    pub fn find_theme(name: &str) -> Option<&'static Theme> {
+        theme_set().themes.get(name)
+    }
+
+    pub fn find_syntax(lang: &str) -> Option<&'static SyntaxReference> {
+        let ps = syntax_set();
+        let trimmed = lang.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        // syntect's by_token / by_extension / scan are all ASCII case-insensitive,
+        // so no separate lowercasing is needed.
+        ps.find_syntax_by_token(trimmed)
+            .or_else(|| ps.find_syntax_by_extension(trimmed))
+            .or_else(|| {
+                ps.syntaxes()
+                    .iter()
+                    .find(|s| s.name.eq_ignore_ascii_case(trimmed))
+            })
+    }
+
+    /// Highlight `code` and return one styled-span vector per source line
+    /// (trailing `\n` stripped). If the highlighter errors on a given line,
+    /// fall back to the raw line styled with `fallback_style` so content is
+    /// never silently dropped.
+    pub fn highlight(
+        code: &str,
+        syntax: &SyntaxReference,
+        theme: &Theme,
+        fallback_style: Style,
+    ) -> Vec<Vec<Span<'static>>> {
+        let ps = syntax_set();
+        let mut highlighter = HighlightLines::new(syntax, theme);
+        let mut out: Vec<Vec<Span<'static>>> = Vec::new();
+        for raw in LinesWithEndings::from(code) {
+            let stripped_line = raw.trim_end_matches('\n');
+            match highlighter.highlight_line(raw, ps) {
+                Ok(ranges) => {
+                    let mut spans: Vec<Span<'static>> = Vec::new();
+                    for (style, text) in ranges {
+                        let stripped = text.trim_end_matches('\n');
+                        if stripped.is_empty() {
+                            continue;
+                        }
+                        spans.push(Span::styled(stripped.to_string(), to_ratatui_style(style)));
+                    }
+                    out.push(spans);
+                }
+                Err(_) => {
+                    // Preserve raw content rather than dropping the line.
+                    let spans = if stripped_line.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![Span::styled(stripped_line.to_string(), fallback_style)]
+                    };
+                    out.push(spans);
+                }
+            }
+        }
+        out
+    }
+
+    fn to_ratatui_style(s: SynStyle) -> Style {
+        let mut st =
+            Style::default().fg(Color::Rgb(s.foreground.r, s.foreground.g, s.foreground.b));
+        if s.font_style.contains(FontStyle::BOLD) {
+            st = st.add_modifier(Modifier::BOLD);
+        }
+        if s.font_style.contains(FontStyle::ITALIC) {
+            st = st.add_modifier(Modifier::ITALIC);
+        }
+        if s.font_style.contains(FontStyle::UNDERLINE) {
+            st = st.add_modifier(Modifier::UNDERLINED);
+        }
+        st
+    }
+}
+
 fn heading_style(level: HeadingLevel, config: &RenderConfig) -> Style {
     use HeadingLevel::*;
     let base = Style::default()
@@ -673,6 +820,8 @@ mod tests {
             heading_color: Color::Red,
             code_color: Color::Green,
             image_height: 12,
+            syntax_highlight: false,
+            syntax_theme: String::new(),
         };
         let lines = parse_with_config("# H", &cfg);
         let span = lines
@@ -767,16 +916,23 @@ mod tests {
         let md = "before\n\n```sh\nline one\nline two\n```\n\n## Heading\n";
         let lines = parse(md);
         let text = flatten_text(&lines);
-        // Each code line should be on its own line, not concatenated.
+        // Syntax highlighting may split a logical code line into several
+        // styled spans, so compare against the *joined* content of each
+        // rendered line.
+        let join = |line: &Line<'static>| -> String {
+            line.spans.iter().map(|s| s.content.as_ref()).collect()
+        };
         let line_one_idx = lines
             .iter()
-            .position(|l| l.spans.iter().any(|s| s.content.as_ref() == "line one"))
+            .position(|l| join(l).contains("line one"))
             .expect("expected 'line one' as its own line");
         let line_two_idx = lines
             .iter()
-            .position(|l| l.spans.iter().any(|s| s.content.as_ref() == "line two"))
+            .position(|l| join(l).contains("line two"))
             .expect("expected 'line two' as its own line");
         assert!(line_two_idx > line_one_idx);
+        // The two code lines must not be on the same rendered row.
+        assert_ne!(line_one_idx, line_two_idx);
         // Heading text must NOT be glued to a code-block line.
         let heading_idx = lines
             .iter()
@@ -797,12 +953,79 @@ mod tests {
     }
 
     #[test]
+    fn test_fenced_rust_block_produces_multiple_token_colors() {
+        // A real Rust snippet should be tokenized into >1 styled spans inside
+        // the code body, with at least two distinct foreground colors.
+        let md = "```rust\nfn main() { let x: u32 = 1; }\n```\n";
+        let cfg = RenderConfig::default();
+        let lines = parse_with_config(md, &cfg);
+        // Locate the body row by its content (must contain "fn main"), not by
+        // structural position — keeps the test robust against future layout
+        // changes that prepend rows with the same border prefix.
+        let body_row = lines
+            .iter()
+            .find(|l| {
+                let joined: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                joined.contains("fn main")
+            })
+            .expect("expected a highlighted body row containing 'fn main'");
+        // Drop the leading border span; the rest must contain >1 colored tokens.
+        let token_spans: Vec<_> = body_row
+            .spans
+            .iter()
+            .skip_while(|s| s.content.as_ref() == "│ ")
+            .collect();
+        assert!(
+            token_spans.len() > 1,
+            "expected highlighter to produce multiple token spans, got {:?}",
+            token_spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<Vec<_>>()
+        );
+        let distinct_colors: std::collections::HashSet<_> =
+            token_spans.iter().filter_map(|s| s.style.fg).collect();
+        assert!(
+            distinct_colors.len() >= 2,
+            "expected at least two distinct token colors, got {:?}",
+            distinct_colors
+        );
+        // The joined token content must still reconstruct the source line.
+        let joined: String = token_spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, "fn main() { let x: u32 = 1; }");
+    }
+
+    #[test]
+    fn test_unknown_language_falls_back_to_code_color() {
+        // An unknown language tag must not crash; output uses plain code_color.
+        let cfg = RenderConfig {
+            h1_color: Color::White,
+            heading_color: Color::Cyan,
+            code_color: Color::Magenta,
+            image_height: 12,
+            syntax_highlight: true,
+            syntax_theme: "base16-ocean.dark".to_string(),
+        };
+        let lines = parse_with_config("```not-a-real-lang\nhello\n```\n", &cfg);
+        let span = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.as_ref() == "hello")
+            .expect("expected 'hello' span verbatim under fallback path");
+        assert_eq!(span.style.fg, Some(Color::Magenta));
+    }
+
+    #[test]
     fn test_code_block_lines_use_code_color() {
         let cfg = RenderConfig {
             h1_color: Color::White,
             heading_color: Color::Cyan,
             code_color: Color::Magenta,
             image_height: 12,
+            // Unfenced block (no lang) falls back to plain `code_color` even
+            // with highlighting enabled, so this exercises the fallback path.
+            syntax_highlight: true,
+            syntax_theme: "base16-ocean.dark".to_string(),
         };
         let lines = parse_with_config("```\nhello\n```\n", &cfg);
         let span = lines
@@ -876,6 +1099,8 @@ mod tests {
             heading_color: Color::Cyan,
             code_color: Color::Yellow,
             image_height: 5,
+            syntax_highlight: false,
+            syntax_theme: String::new(),
         };
         let base = Path::new("/some/dir");
         let result = parse_full_with("![alt](pic.png)", &cfg, Some(base));
@@ -906,6 +1131,8 @@ mod tests {
             heading_color: Color::Cyan,
             code_color: Color::Yellow,
             image_height: 8,
+            syntax_highlight: false,
+            syntax_theme: String::new(),
         };
         let result = parse_full_with("![alt](pic.png)", &cfg, Some(Path::new("/a")));
         let img = &result.images[0];

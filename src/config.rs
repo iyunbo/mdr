@@ -39,6 +39,10 @@ pub struct ThemeConfig {
     pub show_line_numbers: bool,
     #[serde(default = "default_image_height")]
     pub image_height: u16,
+    #[serde(default = "default_syntax_highlight")]
+    pub syntax_highlight: bool,
+    #[serde(default = "default_syntax_theme")]
+    pub syntax_theme: String,
 }
 
 fn default_h1_color() -> String {
@@ -55,6 +59,14 @@ fn default_show_line_numbers() -> bool {
 
 fn default_image_height() -> u16 {
     12
+}
+
+fn default_syntax_highlight() -> bool {
+    true
+}
+
+fn default_syntax_theme() -> String {
+    "base16-ocean.dark".to_string()
 }
 
 // Accepts either `quit = "q"` or `down = ["j", "Down"]` in TOML.
@@ -84,6 +96,8 @@ impl Default for Config {
                 line_number_color: default_line_number_color(),
                 show_line_numbers: default_show_line_numbers(),
                 image_height: default_image_height(),
+                syntax_highlight: default_syntax_highlight(),
+                syntax_theme: default_syntax_theme(),
             },
             ui: UiConfig::default(),
             keys: HashMap::from([
