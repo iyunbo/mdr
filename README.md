@@ -8,6 +8,7 @@ A terminal markdown reader with vi-style keybindings.
 
 - Browse a directory tree, preview markdown files in a side panel
 - Pretty rendering: headings with underlines, styled inline code, aligned tables with borders, italics/bold
+- Syntax-highlighted fenced code blocks via `syntect` (200+ languages); falls back to a single color for unknown languages
 - Inline images via the Kitty graphics protocol (Kitty / Ghostty / WezTerm); other terminals show an alt-text placeholder
 - Vi-style keys: `j`/`k`, count prefixes (`5j`, `12k`), `gg`/`G`, `:N` line jump, `/` and `?` search, `n`/`N` repeat
 - Follow markdown links between files: `Tab` / `Shift+Tab` selects, `Enter` opens the target. Click a link with the mouse to follow it directly
@@ -72,6 +73,8 @@ code_color = "green"
 line_number_color = "darkgray"   # default
 show_line_numbers = true         # default
 image_height = 12                # default — rows reserved per inline image
+syntax_highlight = true          # default — set false to disable code-block highlighting
+syntax_theme = "base16-ocean.dark"  # any syntect built-in theme name
 
 [ui]
 mouse = true             # default — set to false to keep terminal selection intact
@@ -80,6 +83,15 @@ mouse = true             # default — set to false to keep terminal selection i
 quit = "Q"               # string form
 down = ["j", "Down"]     # array form (multiple bindings)
 ```
+
+### Syntax highlight themes
+
+Built-in themes ship with `syntect` and include `base16-ocean.dark` (default,
+designed for dark terminals), `base16-ocean.light`, `base16-eighties.dark`,
+`base16-mocha.dark`, `InspiredGitHub`, `Solarized (dark)`, `Solarized (light)`.
+The defaults assume a **dark terminal background** — on a light background
+prefer `InspiredGitHub` or `Solarized (light)`. Set `syntax_highlight = false`
+to revert to the single-color `code_color` rendering.
 
 ## License
 

@@ -108,6 +108,8 @@ impl App {
             heading_color: markdown::color_from_str(&config.theme.heading_color),
             code_color: markdown::color_from_str(&config.theme.code_color),
             image_height: config.theme.image_height,
+            syntax_highlight: config.theme.syntax_highlight,
+            syntax_theme: config.theme.syntax_theme.clone(),
         };
         Self {
             running: true,
