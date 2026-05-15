@@ -1581,9 +1581,7 @@ mod tests {
     fn test_reload_content_clamps_scroll_when_file_shrinks() {
         let mut app = App::new(Config::default());
         let path = PathBuf::from("/tmp/mdr-test-clamp.md");
-        let long = (0..50)
-            .map(|i| format!("line {i}\n"))
-            .collect::<String>();
+        let long = (0..50).map(|i| format!("line {i}\n")).collect::<String>();
         app.set_content(Some(path.clone()), long, None);
         app.scroll = 40;
 
