@@ -9,7 +9,7 @@ use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 const HISTORY_CAP: usize = 100;
@@ -507,6 +507,45 @@ impl App {
             } else {
                 self.push_history(p);
             }
+        }
+    }
+
+    /// Replace the current file's content in place — preserves scroll, does
+    /// not touch history, does not flicker through `Loading`. Returns true if
+    /// the reload was applied (i.e. `path` matches the file currently open).
+    /// Path equality is canonical-aware so a relative CLI arg (e.g.
+    /// `mdr README.md`) still matches the absolute path the watcher reports.
+    pub fn reload_content(&mut self, path: PathBuf, content: String) -> bool {
+        if !self.is_current_file(&path) {
+            return false;
+        }
+        self.content = Some(content);
+        self.invalidate_parse_cache();
+        let max = self.total_lines().saturating_sub(1) as u16;
+        self.scroll = self.scroll.min(max);
+        self.state = AppState::Viewing;
+        self.load_error = None;
+        true
+    }
+
+    /// Path of the file currently being viewed, taken from history (history
+    /// is the source of truth for path; `file_name` is just a display copy).
+    pub fn current_path(&self) -> Option<&PathBuf> {
+        self.history_pos
+            .and_then(|pos| self.history.get(pos))
+            .map(|e| &e.path)
+    }
+
+    fn is_current_file(&self, path: &Path) -> bool {
+        let Some(cur) = self.current_path() else {
+            return false;
+        };
+        if cur == path {
+            return true;
+        }
+        match (cur.canonicalize(), path.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
         }
     }
 
@@ -1480,6 +1519,75 @@ mod tests {
         assert_eq!(app.state, AppState::Loading);
         assert!(app.content.is_none());
         assert!(app.load_error.is_none());
+    }
+
+    // --- reload_content ---
+
+    #[test]
+    fn test_reload_content_replaces_in_place() {
+        let mut app = App::new(Config::default());
+        let path = PathBuf::from("/tmp/mdr-test-reload.md");
+        app.set_content(Some(path.clone()), "v1\n".to_string(), None);
+        app.scroll = 0;
+        let history_before = app.history.len();
+
+        let applied = app.reload_content(path.clone(), "v2\n".to_string());
+
+        assert!(applied);
+        assert_eq!(app.content.as_deref(), Some("v2\n"));
+        assert_eq!(app.state, AppState::Viewing);
+        assert_eq!(
+            app.history.len(),
+            history_before,
+            "reload must not push history"
+        );
+    }
+
+    #[test]
+    fn test_reload_content_ignored_for_other_path() {
+        let mut app = App::new(Config::default());
+        let active = PathBuf::from("/tmp/mdr-test-active.md");
+        let other = PathBuf::from("/tmp/mdr-test-other.md");
+        app.set_content(Some(active), "active".to_string(), None);
+
+        let applied = app.reload_content(other, "stale".to_string());
+
+        assert!(!applied);
+        assert_eq!(app.content.as_deref(), Some("active"));
+    }
+
+    #[test]
+    fn test_reload_content_matches_canonical_path() {
+        // Simulates `mdr README.md` (relative path stored in history) receiving
+        // a watcher event with the absolute path FSEvents reports back.
+        let dir = tempfile::tempdir().unwrap();
+        let abs = dir.path().join("doc.md");
+        stdfs::write(&abs, "v1").unwrap();
+        // Open via a relative path resolved from the temp dir as cwd.
+        let cwd_before = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let relative = PathBuf::from("doc.md");
+
+        let mut app = App::new(Config::default());
+        app.set_content(Some(relative.clone()), "v1".to_string(), None);
+        let applied = app.reload_content(abs.clone(), "v2".to_string());
+        std::env::set_current_dir(cwd_before).unwrap();
+
+        assert!(applied, "absolute path should match relative current path");
+        assert_eq!(app.content.as_deref(), Some("v2"));
+    }
+
+    #[test]
+    fn test_reload_content_clamps_scroll_when_file_shrinks() {
+        let mut app = App::new(Config::default());
+        let path = PathBuf::from("/tmp/mdr-test-clamp.md");
+        let long = (0..50).map(|i| format!("line {i}\n")).collect::<String>();
+        app.set_content(Some(path.clone()), long, None);
+        app.scroll = 40;
+
+        app.reload_content(path, "only one line\n".to_string());
+
+        assert!(app.scroll <= 1, "scroll should clamp to file length");
     }
 
     // --- clamp_cursor edge: empty tree ---

@@ -5,6 +5,7 @@ mod fs;
 mod keys;
 mod markdown;
 mod ui;
+mod watcher;
 mod wikilink;
 
 use app::{App, AppState, NavDir, SearchDirection};
@@ -27,8 +28,9 @@ struct Cli {
     path: Option<PathBuf>,
 }
 
-enum LoadMsg {
+pub enum LoadMsg {
     Content { path: PathBuf, content: String },
+    Reload { path: PathBuf, content: String },
     Error(String),
 }
 
@@ -73,13 +75,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let (tx, rx) = mpsc::channel::<LoadMsg>();
+    let mut file_watcher = watcher::FileWatcher::new(tx.clone()).ok();
+    if let (Some(w), Some(p)) = (file_watcher.as_mut(), app.current_path()) {
+        w.watch(p);
+    }
     let mut terminal = ratatui::init();
     app.picker = ratatui_image::picker::Picker::from_query_stdio().ok();
     let mouse_enabled = app.config.ui.mouse;
     if mouse_enabled {
         let _ = execute!(stdout(), EnableMouseCapture);
     }
-    let result = run(&mut terminal, &mut app, tx, rx);
+    let result = run(&mut terminal, &mut app, tx, rx, file_watcher.as_mut());
     if mouse_enabled {
         let _ = execute!(stdout(), DisableMouseCapture);
     }
@@ -92,6 +98,7 @@ fn run(
     app: &mut App,
     tx: mpsc::Sender<LoadMsg>,
     rx: mpsc::Receiver<LoadMsg>,
+    mut file_watcher: Option<&mut watcher::FileWatcher>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut needs_redraw = true;
     while app.running {
@@ -99,7 +106,13 @@ fn run(
             match msg {
                 LoadMsg::Content { path, content } => {
                     let base_dir = path.parent().map(|p| p.to_path_buf());
-                    app.set_content(Some(path), content, base_dir);
+                    app.set_content(Some(path.clone()), content, base_dir);
+                    if let Some(w) = file_watcher.as_deref_mut() {
+                        w.watch(&path);
+                    }
+                }
+                LoadMsg::Reload { path, content } => {
+                    app.reload_content(path, content);
                 }
                 LoadMsg::Error(e) => app.set_error(e),
             }
