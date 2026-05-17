@@ -238,6 +238,7 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &mpsc::Sender<LoadMsg>, term_hei
         }
     }
 
+    let had_count = !app.count_buffer.is_empty();
     let count = app.take_count() as usize;
 
     if let Some(&action) = app
@@ -248,7 +249,11 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &mpsc::Sender<LoadMsg>, term_hei
         app.status_message = None;
         let half_page = ((term_height.saturating_sub(2) / 2) as usize).max(1);
         let page = (term_height.saturating_sub(2) as usize).max(1);
-        dispatch(app, action, tx, count, half_page, page);
+        if action == Action::Bottom && had_count {
+            app.goto_line(count);
+        } else {
+            dispatch(app, action, tx, count, half_page, page);
+        }
         return;
     }
 
@@ -403,4 +408,83 @@ fn spawn_load(app: &mut App, tx: &mpsc::Sender<LoadMsg>) {
     };
     let path = path.clone();
     spawn_load_path(app, tx, path);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use std::fs as stdfs;
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn count_prefix_g_jumps_to_line_in_viewing_mode() {
+        let mut app = App::new(Config::default());
+        let (tx, _rx) = mpsc::channel();
+        let content = (1..=20)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.set_content(None, content, None);
+
+        handle_key(&mut app, key('4'), &tx, 5);
+        handle_key(&mut app, key('G'), &tx, 5);
+
+        assert_eq!(app.scroll, 3);
+        assert_eq!(app.count_buffer, "");
+    }
+
+    #[test]
+    fn bare_g_still_jumps_to_bottom_in_viewing_mode() {
+        let mut app = App::new(Config::default());
+        let (tx, _rx) = mpsc::channel();
+        let content = (1..=20)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.set_content(None, content, None);
+
+        handle_key(&mut app, key('G'), &tx, 5);
+
+        assert_eq!(app.scroll, 18);
+    }
+
+    #[test]
+    fn one_g_jumps_to_first_line_in_viewing_mode() {
+        let mut app = App::new(Config::default());
+        let (tx, _rx) = mpsc::channel();
+        let content = (1..=20)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.set_content(None, content, None);
+        app.scroll = 10;
+
+        handle_key(&mut app, key('1'), &tx, 5);
+        handle_key(&mut app, key('G'), &tx, 5);
+
+        assert_eq!(app.scroll, 0);
+        assert_eq!(app.count_buffer, "");
+    }
+
+    #[test]
+    fn count_prefix_g_jumps_to_item_in_browsing_mode() {
+        let mut app = App::new(Config::default());
+        let (tx, _rx) = mpsc::channel();
+        let dir = tempfile::tempdir().unwrap();
+        for n in 1..=5 {
+            stdfs::write(dir.path().join(format!("f{n}.md")), "x").unwrap();
+        }
+        app.tree = Some(fs::walk_dir(dir.path()).unwrap());
+        app.state = AppState::Browsing;
+
+        handle_key(&mut app, key('3'), &tx, 5);
+        handle_key(&mut app, key('G'), &tx, 5);
+
+        assert_eq!(app.tree_cursor, 2);
+        assert_eq!(app.count_buffer, "");
+    }
 }
