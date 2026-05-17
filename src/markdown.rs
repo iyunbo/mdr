@@ -4,6 +4,7 @@ use ratatui::{
     text::{Line, Span},
 };
 use std::path::{Path, PathBuf};
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone)]
 pub struct RenderConfig {
@@ -678,7 +679,9 @@ fn blank_before_heading(lines: &mut Vec<Line<'static>>, level: HeadingLevel) {
 }
 
 fn cell_width(cell: &[Span<'static>]) -> usize {
-    cell.iter().map(|s| s.content.chars().count()).sum()
+    cell.iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum()
 }
 
 fn render_table(buf: TableBuf, lines: &mut Vec<Line<'static>>) {
@@ -1071,6 +1074,34 @@ mod tests {
             header_text.contains("a  "),
             "expected 'a' padded with spaces, got {:?}",
             header_text
+        );
+    }
+
+    #[test]
+    fn test_table_columns_use_terminal_display_width_for_cjk() {
+        let md = "| 角色 | 定位 |\n|---|---|\n| 孙尚香 | 情感锚点 |\n| 刘备 | 政治主线推动者 |\n";
+        let lines = parse(md);
+        let row_widths: Vec<usize> = lines
+            .iter()
+            .filter_map(|line| {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                if text.contains('│') {
+                    Some(UnicodeWidthStr::width(text.as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            row_widths.len() >= 3,
+            "expected table border/header/body rows, got {:?}",
+            flatten_text(&lines)
+        );
+        assert!(
+            row_widths.iter().all(|w| *w == row_widths[0]),
+            "expected all rendered table rows to have equal display width, got {:?}",
+            row_widths
         );
     }
 
